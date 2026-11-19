@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' qrc:; style-src 'self' 'unsafe-inline'; img-src data: blob:; frame-src 'self' about:">
+<title>电子书正文编辑</title>
+<link rel="stylesheet" href="editor.css">
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script defer src="editor.js"></script>
+</head>
+<body>
+<main id="workspace">
+  <section id="editor-pane" class="pane" aria-label="正文编辑" hidden>
+    <h2 class="pane-title editor-title">正文编辑</h2>
+    <div id="toolbar" role="group" aria-label="正文排版" hidden>
+      <div class="tool-group" role="group" aria-label="段落样式">
+        <button type="button" data-command="paragraph" aria-pressed="false">正文</button>
+        <button type="button" data-command="h2" aria-pressed="false" title="二级标题">标题</button>
+        <button type="button" data-command="h3" aria-pressed="false" title="三级标题">小标题</button>
+      </div>
+      <div class="tool-group" role="group" aria-label="文字样式">
+        <button type="button" data-command="bold" aria-pressed="false">加粗</button>
+        <button type="button" data-command="italic" aria-pressed="false">斜体</button>
+        <button type="button" data-command="sup" aria-pressed="false">上标</button>
+        <button type="button" data-command="sub" aria-pressed="false">下标</button>
+      </div>
+      <div class="tool-group" role="group" aria-label="列表、引用与表格">
+        <button type="button" data-command="bullet" aria-label="项目列表" aria-pressed="false">列表</button>
+        <button type="button" data-command="ordered" aria-label="编号列表" aria-pressed="false">编号</button>
+        <button type="button" data-command="quote" aria-pressed="false">引用</button>
+        <button type="button" data-command="table" aria-label="插入表格">表格</button>
+      </div>
+      <div class="tool-group" role="group" aria-label="编辑历史">
+        <button type="button" data-command="undo" disabled>撤销</button>
+        <button type="button" data-command="redo" disabled>重做</button>
+      </div>
+    </div>
+    <div id="editor"></div>
+  </section>
+  <section id="preview-pane" class="pane" aria-labelledby="preview-title" hidden>
+    <div class="pane-header">
+      <h2 id="preview-title" class="pane-title">阅读预览</h2>
+      <span id="preview-size"></span>
+    </div>
+    <div class="preview-mat">
+      <div id="preview-stage">
+        <div id="preview-surface">
+          <iframe id="preview" title="电子书章节预览" sandbox="allow-same-origin" hidden></iframe>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+</body>
+</html>
