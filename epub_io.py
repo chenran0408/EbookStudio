@@ -24,6 +24,7 @@ DC = 'http://purl.org/dc/elements/1.1/'
 CONTAINER = 'urn:oasis:names:tc:opendocument:xmlns:container'
 NCX = 'http://www.daisy.org/z3986/2005/ncx/'
 MIMETYPE = b'application/epub+zip'
+INLINE_TOC_GENERATOR = 'EbookStudio inline table of contents'
 XHTML_MEDIA = 'application/xhtml+xml'
 NCX_MEDIA = 'application/x-dtbncx+xml'
 CSS = b'''body { line-height:1.75; }
@@ -255,6 +256,9 @@ def open_epub(path: str | Path) -> Book:
             body = document.find(f'{{{XHTML}}}body')
             if body is None:
                 raise ValueError(f'章节缺少 XHTML body：{name}')
+            generator = document.find(f'{{{XHTML}}}head/{{{XHTML}}}meta[@name="generator"][@content="{INLINE_TOC_GENERATOR}"]')
+            if generator is not None:
+                book.inline_toc_path = name
             content = _inner(body)
             title, level = label_map.get(name, (
                 (document.findtext(f'{{{XHTML}}}head/{{{XHTML}}}title') or Path(name).stem).strip(),
@@ -361,6 +365,8 @@ def _write_chapter(book: Book, chapter: Chapter, css: str) -> bytes:
         doc, body = _document(chapter.title, book.language)
         head = doc.find(f'{{{XHTML}}}head')
         _put(head, f'{{{XHTML}}}link', rel='stylesheet', href=asset_href(css, chapter.path))
+        if chapter.path == book.inline_toc_path:
+            _put(head, f'{{{XHTML}}}meta', name='generator', content=INLINE_TOC_GENERATOR)
         _set_body(_put(body, f'{{{XHTML}}}main'), chapter.html)
         if chapter.source.startswith(('https://', 'http://')):
             footer = _put(body, f'{{{XHTML}}}footer')
@@ -443,7 +449,7 @@ def _toc_href(entry: TocEntry, document: str) -> str:
     return f"{href}#{quote(entry['fragment'], safe='')}" if entry['fragment'] else href
 
 
-def _nav_tree(entries: Iterable[TocEntry]) -> list:
+def toc_tree(entries: Iterable[TocEntry]) -> list:
     root = []
     stack = [root]
     for entry in entries:
@@ -453,6 +459,16 @@ def _nav_tree(entries: Iterable[TocEntry]) -> list:
         stack[-1].append((entry, children))
         stack.append(children)
     return root
+
+
+def append_toc_list(parent, path: str, tree: list) -> None:
+    def add(parent, group):
+        for entry, children in group:
+            item = _put(parent, f'{{{XHTML}}}li')
+            _put(item, f'{{{XHTML}}}a', entry['title'], href=_toc_href(entry, path))
+            if children:
+                add(_put(item, f'{{{XHTML}}}ol'), children)
+    add(_put(parent, f'{{{XHTML}}}ol'), tree)
 
 
 def _write_nav(title: str, language: str, path: str, tree: list,
@@ -468,13 +484,7 @@ def _write_nav(title: str, language: str, path: str, tree: list,
     new_toc.set(f'{{{EPUB}}}type', 'toc')
     new_toc.set('id', toc.get('id', 'toc') if toc is not None else 'toc')
     _put(new_toc, f'{{{XHTML}}}h1', '目录')
-    def add(parent, group):
-        for entry, children in group:
-            item = _put(parent, f'{{{XHTML}}}li')
-            _put(item, f'{{{XHTML}}}a', entry['title'], href=_toc_href(entry, path))
-            if children:
-                add(_put(item, f'{{{XHTML}}}ol'), children)
-    add(_put(new_toc, f'{{{XHTML}}}ol'), tree)
+    append_toc_list(new_toc, path, tree)
     if toc is not None:
         toc.getparent().replace(toc, new_toc)
     else:
@@ -689,7 +699,7 @@ def write_epub(book: Book, path: str | Path, *, mobile: bool = True) -> None:
         css_path = _unique('styles/book.css', occupied)
         assets[css_path] = Asset(CSS + b'\n' + book.stylesheet.encode('utf-8'), 'text/css')
     entries = chapter_toc(book.chapters) if book.toc_entries is None else current_toc(book)
-    tree = _nav_tree(entries)
+    tree = toc_tree(entries)
     unchanged_toc_structure = [(c.path, c.level) for c in book.chapters] == [
         (name, book._epub_chapters[name][1]) for name in original_spine
     ]

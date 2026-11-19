@@ -307,16 +307,23 @@ class BookCheckpointsDialog(QDialog):
             super().accept()
 
 
-def show_book_replace(studio) -> None:
+def show_book_replace(studio, *, spelling=None) -> None:
     """Flush the current editor buffer and open the whole-book replacement dialog."""
     if not studio.book_started or studio.task is not None:
         return
-    studio.flush_current_edits(lambda: _replace_current_book(studio))
+    studio.flush_current_edits(lambda: _replace_current_book(studio, spelling))
 
 
-def _replace_current_book(studio):
+def _replace_current_book(studio, spelling=None):
     book = studio.book
     dialog = BookReplaceDialog(studio, book, studio.workspace)
+    if spelling:
+        pattern, replacement = spelling
+        dialog.query.setText(pattern)
+        dialog.replacement.setText(replacement)
+        dialog.regular.setChecked(True)
+        dialog.case_sensitive.setChecked(True)
+        dialog.preview_changes()
     result = dialog.exec()
     dialog.deleteLater()
     if result != QDialog.DialogCode.Accepted:

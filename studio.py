@@ -29,17 +29,20 @@ from PySide6.QtWidgets import (
 from book_info import BookInfoDialog
 from book_library import BookLibrary
 from book_library_dialog import BookLibraryDialog
+from book_library_search_dialog import LibraryTextDialog
 from book_links import map_css_references
 from book_quality_dialog import show_book_quality
 from book_resources_dialog import show_book_resources
 from book_revision_dialogs import show_book_checkpoints, show_book_replace
 from book_search import select_search_result
+from book_spelling_dialog import show_spelling
 from book_structure_dialog import show_book_structure
 from book_typography import DEFAULT_STYLE_PATH, FONT_TYPES, decode_stylesheet
 from book_typography_dialog import show_typography
 from ebook_core import Asset, Book, Chapter, asset_href, resolve_href
 from epub_validation_dialog import EpubCheckDialog
 from first_book import first_book
+from inline_toc import show_inline_toc
 import capture
 from capture_review import CaptureProfilesDialog, WebUpdateDialog
 from capture_update import CaptureProfile, apply_updates, collect_updates, profiles_for, remember_profile
@@ -490,6 +493,7 @@ class Studio(QMainWindow):
         self.source_document = None
         self.task = None
         self.web_ready = False
+        self.preview_fragment = ""
         self.workspace = Workspace()
         self.book_started = False
         self.showing_start = True
@@ -735,11 +739,15 @@ class Studio(QMainWindow):
         self.recent_menu.aboutToShow.connect(self.refresh_recent_menu)
         library_action = file_menu.addAction("书库…", self.open_library)
         library_action.setProperty("commandKeywords", "作者 标签 书架 本机书籍")
+        full_text_action = file_menu.addAction("跨书全文检索…", lambda: self.open_library(full_text=True))
+        full_text_action.setProperty("commandKeywords", "书库 正文 句子 期号 章节")
         file_menu.addAction("恢复草稿…", self.choose_recovery)
         revision_menu = self.menuBar().addMenu("校对")
         self.check_book_action = revision_menu.addAction("检查书稿…", self.check_book_quality)
         self.replace_text_action = revision_menu.addAction("整书查找替换…", lambda: show_book_replace(self))
         self.replace_text_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
+        self.spelling_action = revision_menu.addAction("拼写检查与个人词典…", lambda: show_spelling(self))
+        self.spelling_action.setProperty("commandKeywords", "拼写 字典 词典 OCR 错词 专名")
         self.checkpoints_action = revision_menu.addAction("检查点…", lambda: show_book_checkpoints(self))
         self.ocr_review_action = revision_menu.addAction("OCR 原图对照…", self.review_current_scan)
         view_menu = self.menuBar().addMenu("视图")
@@ -757,6 +765,8 @@ class Studio(QMainWindow):
         convert_menu.addAction("采集网页…", self.capture_urls)
         self.book_info_action = convert_menu.addAction("书籍资料…", self.edit_book_info)
         self.structure_action = convert_menu.addAction("目录和章节管理…", self.manage_book_structure)
+        self.inline_toc_action = convert_menu.addAction("生成或更新书内目录页…", lambda: show_inline_toc(self))
+        self.inline_toc_action.setProperty("commandKeywords", "书内目录 正文目录 可翻阅目录")
         self.resources_action = convert_menu.addAction("书稿资源…", self.manage_book_resources)
         self.web_update_action = convert_menu.addAction("网页增量采集…", self.open_web_profiles)
         typography_action = convert_menu.addAction("CSS 与字体…", self.edit_stylesheet)
@@ -1021,7 +1031,8 @@ class Studio(QMainWindow):
                        self.check_book_action, self.show_book_action, self.book_info_action):
             action.setEnabled(self.book_started)
         ready = self.book_started and bool(self.book.chapters)
-        for action in (self.replace_text_action, self.ocr_review_action, self.structure_action):
+        for action in (self.replace_text_action, self.ocr_review_action, self.structure_action,
+                       self.inline_toc_action, self.spelling_action):
             action.setEnabled(ready)
         self.export_button.setEnabled(bool(self.book.chapters))
         self.export_action.setEnabled(ready)
@@ -1159,6 +1170,7 @@ class Studio(QMainWindow):
 
     def select(self, row):
         self.active = row
+        self.preview_fragment = ""
         self.token = secrets.token_hex(8)
         chapter = self.chapter()
         if self.source_document is not None and (chapter is None or chapter.path != self.source_document[0]):
@@ -1341,7 +1353,8 @@ class Studio(QMainWindow):
                 self.statusBar().showMessage(f"预览解析失败 · {exc}")
                 return
             self.script("open", self.token, chapter.html, resources, "split" if live_preview else mode,
-                        stylesheet, self.device.currentData())
+                        stylesheet, self.device.currentData(), self.preview_fragment)
+            self.preview_fragment = ""
 
     def source_changed(self):
         chapter = self.chapter()
@@ -1499,19 +1512,52 @@ class Studio(QMainWindow):
         if name:
             self.open_path(Path(name))
 
-    def open_library(self):
+    def open_library(self, *, full_text=False):
         try:
-            dialog = BookLibraryDialog(self, BookLibrary(self.workspace.directory))
+            library = BookLibrary(self.workspace.directory)
         except (OSError, sqlite3.Error) as exc:
             self.error(f"无法打开本机书库。\n{exc}")
             return
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.chosen_path is not None:
-            self.open_path(dialog.chosen_path)
+        dialog = LibraryTextDialog(self, library) if full_text else BookLibraryDialog(self, library)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            hit = dialog.hit if full_text else dialog.chosen_hit
+            path = hit.path if hit else dialog.chosen_path
+            if path is not None:
+                self.open_path(path, chapter_path=hit.chapter_path if hit else None,
+                               fragment=hit.fragment if hit else "")
         dialog.deleteLater()
 
-    def open_path(self, path):
+    def open_path(self, path, *, chapter_path=None, fragment=""):
+        def chapter_index(book):
+            return next((i for i, chapter in enumerate(book.chapters) if chapter.path == chapter_path), None)
+
+        def show_result(row):
+            self.go_to_chapter(row)
+            if fragment:
+                self.preview_fragment = fragment
+                with QSignalBlocker(self.mode):
+                    self.mode.setCurrentIndex(VIEW_MODES.index("preview"))
+                self.open_view()
+
+        if chapter_path and path == self.project:
+            row = chapter_index(self.book)
+            if row is not None:
+                self.flush_current_edits(lambda: show_result(row))
+            else:
+                self.error("当前书稿中的章节已移动或删除，请保存后刷新索引。")
+            return
+
+        def loaded(book):
+            row = chapter_index(book) if chapter_path else None
+            if chapter_path and row is None:
+                self.error("原文件中的章节已更改，请刷新索引。")
+                return
+            self.opened(book, path)
+            if row is not None:
+                show_result(row)
+
         if self.can_leave():
-            self.start_task("正在打开书籍…", lambda: read_book(path), lambda book: self.opened(book, path))
+            self.start_task("正在打开书籍…", lambda: read_book(path), loaded)
 
     def opened(self, book, path, *, remember_source=True):
         self.replace_book(book, path if path.suffix.lower() == ".bookproj" else None)

@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 import re
 
-from lxml import etree, html
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -11,57 +10,15 @@ from PySide6.QtWidgets import (
 )
 
 from ebook_core import Book
-from epub_io import chapter_html
+from book_readable import readable_sections
 
 
 MAX_HITS = 200
 CONTEXT = 32
-BLOCK_ELEMENTS = {
-    "address", "article", "aside", "blockquote", "br", "caption", "dd", "div",
-    "dl", "dt", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5",
-    "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
-    "table", "td", "th", "tr", "ul",
-}
-HIDDEN_ELEMENTS = {"head", "script", "style", "template", "noscript"}
 
 
 def _readable_text(document: str) -> str:
-    if not document.strip():
-        return ""
-    try:
-        document = chapter_html(document)
-    except (etree.XMLSyntaxError, ValueError):
-        # A writer can search a chapter while its XHTML source is still being edited.
-        pass
-    try:
-        page = html.document_fromstring(document)
-    except etree.ParserError:
-        return ""
-    body = page.find("body")
-    if body is None:
-        return ""
-    pieces = []
-
-    def visit(node):
-        if not isinstance(node.tag, str):
-            return
-        tag = node.tag.rsplit(":", 1)[-1]
-        if tag in HIDDEN_ELEMENTS or "hidden" in node.attrib:
-            return
-        separated = tag in BLOCK_ELEMENTS
-        if separated:
-            pieces.append(" ")
-        if node.text:
-            pieces.append(node.text)
-        for child in node:
-            visit(child)
-            if child.tail:
-                pieces.append(child.tail)
-        if separated:
-            pieces.append(" ")
-
-    visit(body)
-    return " ".join("".join(pieces).split())
+    return " ".join(text for _, text in readable_sections(document))
 
 
 @dataclass(frozen=True)

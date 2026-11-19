@@ -5,6 +5,7 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_sub
 root = Path(SPECPATH)
 datas = [(str(root / "web" / name), "web") for name in ("index.html", "editor.css", "editor.js")]
 datas.append((str(root / "samples" / "pencil-shadows.png"), "samples"))
+datas.extend((str(root / "dictionaries" / name), "dictionaries") for name in ("en_US.aff", "en_US.dic"))
 datas.extend((str(root / name), ".") for name in ("paddle_worker.py", "agent.md"))
 datas += copy_metadata("trafilatura")
 datas += collect_data_files("trafilatura", includes=["settings.cfg"])

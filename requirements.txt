@@ -10,3 +10,4 @@ markdown-it-py>=3
 tinycss2>=1.4.0
 fonttools>=4.60.1
 Brotli>=1.2.0
+spylls==0.1.7

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout,
 )
 
+from book_library_search_dialog import LibraryTextDialog
 from book_library import BOOK_FILTER, BOOK_READ_ERRORS, BookLibrary, LibraryEntry, LibraryImport, tag_names
 
 
@@ -100,7 +101,7 @@ class BookLibraryDialog(QDialog):
     def __init__(self, parent, library: BookLibrary):
         super().__init__(parent)
         self.library = library
-        self.chosen_path = None
+        self.chosen_path = self.chosen_hit = None
         self.entries: dict[int, LibraryEntry] = {}
         self.available: set[int] = set()
         self.import_task = None
@@ -119,6 +120,9 @@ class BookLibraryDialog(QDialog):
         self.add_button.setObjectName('primary')
         self.add_button.setToolTip('再次添加同一文件可更新原书资料。')
         header.addWidget(self.search, 1)
+        self.full_text_button = QPushButton('搜索正文…')
+        self.full_text_button.clicked.connect(self.search_text)
+        header.addWidget(self.full_text_button)
         header.addWidget(self.add_button)
         layout.addLayout(header)
 
@@ -200,6 +204,16 @@ class BookLibraryDialog(QDialog):
         self.reload()
         self.search.setFocus()
 
+    def search_text(self):
+        if self.import_task is not None:
+            return
+        dialog = LibraryTextDialog(self, self.library)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.chosen_hit = dialog.hit
+            self.chosen_path = dialog.hit.path
+            self.accept()
+        dialog.deleteLater()
+
     def selected_ids(self):
         return [item.data(0, Qt.ItemDataRole.UserRole) for item in self.table.selectedItems()]
 
@@ -280,6 +294,7 @@ class BookLibraryDialog(QDialog):
         self.import_task.failed.connect(lambda error: self.note(f'无法更新书库。{error}'))
         self.import_task.finished.connect(self.finish_import)
         self.add_button.setEnabled(False)
+        self.full_text_button.setEnabled(False)
         self.update_actions()
         self.note(f'正在读取 {len(paths)} 个文件的书籍资料…')
         self.import_task.start()
@@ -304,6 +319,7 @@ class BookLibraryDialog(QDialog):
         self.import_task.deleteLater()
         self.import_task = None
         self.add_button.setEnabled(True)
+        self.full_text_button.setEnabled(True)
         self.update_actions()
 
     def edit_selected(self):

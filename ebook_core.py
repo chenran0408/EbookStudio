@@ -106,6 +106,7 @@ class Book:
     _epub_chapters: dict[str, tuple[str, int, str]] = field(default_factory=dict, repr=False)
     linked_stylesheets: list[str] = field(default_factory=list)
     font_subsets: list[str] = field(default_factory=list)
+    inline_toc_path: str | None = None
 
     def save(self, path: str | Path) -> None:
         chapter_rows = []
@@ -128,6 +129,7 @@ class Book:
             'chapters': chapter_rows,
             'chapter_context': chapter_context,
             'toc_entries': self.toc_entries,
+            'inline_toc_path': self.inline_toc_path,
             'capture_profiles': self.capture_profiles,
             'assets': {name: asset.media_type for name, asset in self.assets.items()},
             'cover': self.cover,
@@ -164,6 +166,7 @@ class Book:
                 font_subsets=data.get('font_subsets', []),
                 chapters=chapters,
                 toc_entries=data.get('toc_entries'),
+                inline_toc_path=data.get('inline_toc_path'),
                 capture_profiles=data.get('capture_profiles', []),
                 assets={
                     name: Asset(project.read(f'assets/{archive_path(name)}'), media)

@@ -336,16 +336,26 @@ function previewScrollElement() {
 
 preview.addEventListener("load", () => {
   const scroll = previewScrollElement();
-  if (scroll) scroll.scrollTop = previewScroll;
+  if (!scroll) return;
+  const doc = preview.contentDocument!;
+  const fragment = doc.documentElement.dataset.targetFragment;
+  const target = fragment && (doc.getElementById(fragment) || doc.getElementsByName(fragment)[0]);
+  if (target) {
+    target.scrollIntoView({ block: "start" });
+    previewScroll = scroll.scrollTop;
+  } else {
+    scroll.scrollTop = previewScroll;
+  }
 });
 
-function showPreview(html: string) {
+function showPreview(html: string, fragment = "") {
   // Keep the previous position until the latest preview document finishes loading.
   previewScroll = previewChapter === token ? previewScrollElement()?.scrollTop ?? previewScroll : 0;
   previewChapter = token;
   const doc = document.implementation.createHTMLDocument("章节预览");
   doc.documentElement.lang = "zh-CN";
   doc.documentElement.dataset.previewRevision = String(++previewRevision);
+  if (fragment) doc.documentElement.dataset.targetFragment = fragment;
   const meta = doc.createElement("meta");
   meta.httpEquiv = "Content-Security-Policy";
   meta.content = "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'";
@@ -371,7 +381,8 @@ function showPreview(html: string) {
 
 Object.assign(window, {
   studioEditor: {
-    open(next: string, html: string, resources: Record<string, string>, view: string, stylesheet: string, width: number) {
+    open(next: string, html: string, resources: Record<string, string>, view: string, stylesheet: string, width: number,
+         fragment = "") {
       window.clearTimeout(previewTimer);
       if (token !== next) edited = false;
       token = next;
@@ -403,7 +414,7 @@ Object.assign(window, {
         previewStylesheet = stylesheet;
         previewTitle.textContent = view === "split" ? "实时预览" : "阅读预览";
         fitPreview();
-        showPreview(view === "split" ? editor.getHTML() : html);
+        showPreview(view === "split" ? editor.getHTML() : html, fragment);
       }
     },
     image(key: string, url: string, alt: string) {
