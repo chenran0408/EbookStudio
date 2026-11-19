@@ -39,6 +39,7 @@ from book_typography import DEFAULT_STYLE_PATH, FONT_TYPES, decode_stylesheet
 from book_typography_dialog import show_typography
 from ebook_core import Asset, Book, Chapter, asset_href, resolve_href
 from epub_validation_dialog import EpubCheckDialog
+from first_book import first_book
 import capture
 from capture_review import CaptureProfilesDialog, WebUpdateDialog
 from capture_update import CaptureProfile, apply_updates, collect_updates, profiles_for, remember_profile
@@ -728,6 +729,8 @@ class Studio(QMainWindow):
             action.setShortcut(standard)
             action.triggered.connect(function)
             file_menu.addAction(action)
+        sample_action = file_menu.addAction("用示例制作第一本书", self.open_first_book)
+        sample_action.setProperty("commandKeywords", "入门 教程 样书 EPUB")
         self.recent_menu = file_menu.addMenu("最近打开")
         self.recent_menu.aboutToShow.connect(self.refresh_recent_menu)
         library_action = file_menu.addAction("书库…", self.open_library)
@@ -824,7 +827,13 @@ class Studio(QMainWindow):
         outer.addLayout(centered)
         outer.addStretch()
 
-        blocks.addWidget(QLabel("开始制作电子书", objectName="startTitle"))
+        start_heading = QHBoxLayout()
+        start_heading.addWidget(QLabel("开始制作电子书", objectName="startTitle"), 1)
+        sample = QPushButton("用示例制作第一本书")
+        sample.setToolTip("打开可编辑的中文示例，练习保存工程和导出 EPUB")
+        sample.clicked.connect(self.open_first_book)
+        start_heading.addWidget(sample)
+        blocks.addLayout(start_heading)
         self.current_book_strip = QWidget(objectName="currentBook")
         current = QHBoxLayout(self.current_book_strip)
         current.setContentsMargins(14, 9, 14, 9)
@@ -1455,6 +1464,11 @@ class Studio(QMainWindow):
             self.replace_book(Book(chapters=[Chapter("第一章", "<p></p>")]), None)
             self.chapter_title.setFocus()
             self.chapter_title.selectAll()
+
+    def open_first_book(self):
+        if self.can_leave():
+            self.replace_book(first_book(), None)
+            self.statusBar().showMessage("改一句正文，点「保存工程」留存书稿，再点「导出」制作 EPUB。")
 
     def replace_book(self, book, project):
         self.discard_draft()

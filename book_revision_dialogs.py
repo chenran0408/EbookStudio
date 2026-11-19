@@ -4,11 +4,13 @@ from zipfile import BadZipFile
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QPushButton, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout,
 )
 
 from book_replace import preview_replacement, replace_with_checkpoint
+from ebook_core import Book
+from replacement_rules import Rule, SavedRules
 
 
 def _status(text=""):
@@ -37,11 +39,12 @@ def _close_buttons(dialog):
 
 
 class BookReplaceDialog(QDialog):
-    def __init__(self, parent, book):
+    def __init__(self, parent, book, workspace):
         super().__init__(parent)
         self.setWindowTitle("全书查找替换")
         self.resize(680, 520)
         self.book = book
+        self.rules = SavedRules(workspace.directory)
         self.plan = None
         self.review_index = 0
 
@@ -52,6 +55,22 @@ class BookReplaceDialog(QDialog):
         layout.addWidget(_status("格式标签会分隔可匹配的文字。将替换文字留空可删除匹配内容。"))
 
         form = QFormLayout()
+        rule_row = QHBoxLayout()
+        self.rule_list = QComboBox()
+        self.rule_list.setAccessibleName("我的校对规则")
+        self.rule_list.setPlaceholderText("选择规则以填入设置")
+        rule_label = QLabel("我的规则")
+        rule_label.setBuddy(self.rule_list)
+        rule_row.addWidget(self.rule_list, 1)
+        self.save_rule = QPushButton("保存为规则…")
+        self.save_rule.setAutoDefault(False)
+        self.save_rule.setEnabled(False)
+        self.delete_rule = QPushButton("删除规则…")
+        self.delete_rule.setAutoDefault(False)
+        self.delete_rule.setEnabled(False)
+        rule_row.addWidget(self.save_rule)
+        rule_row.addWidget(self.delete_rule)
+        form.addRow(rule_label, rule_row)
         self.query = _field(form, "查找文字")
         self.replacement = _field(form, "替换为")
         layout.addLayout(form)
@@ -91,13 +110,92 @@ class BookReplaceDialog(QDialog):
         self.regular.toggled.connect(self.invalidate)
         self.case_sensitive.toggled.connect(self.invalidate)
         self.preview.clicked.connect(self.preview_changes)
+        self.rule_list.activated.connect(self.load_rule)
+        self.save_rule.clicked.connect(self.save_current_rule)
+        self.delete_rule.clicked.connect(self.remove_current_rule)
+        self.refresh_rules()
         self.query.setFocus()
+
+    def refresh_rules(self, selected=""):
+        self.rule_list.clear()
+        try:
+            rules = self.rules.read()
+        except (OSError, ValueError) as exc:
+            self.status.setText(f"无法读取校对规则。{exc}")
+            rules = {}
+        for name in sorted(rules, key=str.casefold):
+            self.rule_list.addItem(name, rules[name])
+        self.rule_list.setPlaceholderText("选择规则以填入设置" if rules else "尚无保存的规则")
+        self.rule_list.setCurrentIndex(self.rule_list.findText(selected))
+        self.delete_rule.setEnabled(self.rule_list.currentIndex() >= 0)
+
+    def load_rule(self, index):
+        rule = self.rule_list.itemData(index)
+        if rule is None:
+            return
+        self.query.setText(rule.query)
+        self.replacement.setText(rule.replacement)
+        self.regular.setChecked(rule.regular)
+        self.case_sensitive.setChecked(rule.case_sensitive)
+        self.invalidate()
+        self.delete_rule.setEnabled(True)
+        self.preview.setFocus()
+
+    def change_rule(self, name, previous, replacement):
+        try:
+            self.rules.change(name, previous, replacement)
+        except (OSError, ValueError) as exc:
+            self.refresh_rules()
+            self.status.setText(f"未保存此更改。{exc}")
+            return
+        self.refresh_rules(name if replacement else "")
+        self.status.setText(f"已保存规则「{name}」。" if replacement else f"已删除规则「{name}」。")
+
+    def confirm_rule_change(self, title, question, action):
+        dialog = QMessageBox(QMessageBox.Icon.Question, title, question, parent=self)
+        confirm = dialog.addButton(action, QMessageBox.ButtonRole.DestructiveRole)
+        cancel = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel)
+        dialog.exec()
+        confirmed = dialog.clickedButton() == confirm
+        dialog.deleteLater()
+        return confirmed
+
+    def save_current_rule(self):
+        rule = Rule(self.query.text(), self.replacement.text(), self.regular.isChecked(),
+                    self.case_sensitive.isChecked())
+        try:
+            # Validate the expression and capture references even if the current book has no matches.
+            preview_replacement(Book(), rule.query, rule.replacement,
+                                regular=rule.regular, case_sensitive=rule.case_sensitive)
+        except ValueError as exc:
+            self.status.setText(str(exc))
+            return
+        name, accepted = QInputDialog.getText(self, "保存校对规则", "规则名称", text=self.rule_list.currentText())
+        if not accepted:
+            return
+        name = name.strip()
+        index = self.rule_list.findText(name)
+        previous = self.rule_list.itemData(index)
+        if previous is not None and not self.confirm_rule_change(
+            "更新已有规则", f"用当前查找和替换设置更新规则「{name}」？", "更新规则",
+        ):
+            return
+        self.change_rule(name, previous, rule)
+
+    def remove_current_rule(self):
+        name = self.rule_list.currentText()
+        if self.rule_list.currentIndex() < 0:
+            return
+        if self.confirm_rule_change("删除校对规则", f"从本机移除规则「{name}」？", "删除规则"):
+            self.change_rule(name, self.rule_list.currentData(), None)
 
     def invalidate(self):
         self.plan = None
         self.results.clear()
         self.apply_button.setEnabled(False)
         self.preview.setEnabled(bool(self.query.text()))
+        self.save_rule.setEnabled(bool(self.query.text()))
         self.status.setText("输入查找文字并预览变更。" if not self.query.text() else "点击预览替换查看变更。")
 
     def preview_changes(self):
@@ -218,8 +316,10 @@ def show_book_replace(studio) -> None:
 
 def _replace_current_book(studio):
     book = studio.book
-    dialog = BookReplaceDialog(studio, book)
-    if dialog.exec() != QDialog.DialogCode.Accepted:
+    dialog = BookReplaceDialog(studio, book, studio.workspace)
+    result = dialog.exec()
+    dialog.deleteLater()
+    if result != QDialog.DialogCode.Accepted:
         return
     plan = dialog.plan
     revision = studio.edit_revision

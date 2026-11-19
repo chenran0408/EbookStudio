@@ -8,9 +8,10 @@ from lxml import etree
 from PIL import Image
 
 from book_resources import replacement_asset, resource_category, resource_references
-from book_structure import edit_toc_entry, heading_toc, merge_chapters, move_toc_entry, split_chapter, split_choices, toc_destinations
+from book_structure import (edit_toc_entry, heading_toc, merge_chapters, move_toc_entry,
+                            split_chapter, split_choices, toc_destinations, toc_heading_choices)
 from ebook_core import Asset, Book, Chapter, asset_href, resolve_href
-from epub_io import EPUB, OPF, XHTML, current_toc, open_epub, write_epub
+from epub_io import EPUB, OPF, XHTML, current_toc, editable_chapter_document, open_epub, write_epub
 
 
 X = f'{{{XHTML}}}'
@@ -97,6 +98,31 @@ class BookStructureTests(unittest.TestCase):
             reloaded.chapters[0].html = '<p>旧锚点已删除。</p>'
             with self.assertRaisesRegex(ValueError, '锚点'):
                 write_epub(reloaded, folder / 'invalid.epub')
+
+    def test_selected_headings_promote_orphans_without_attaching_to_preceding_sibling(self):
+        book = Book('春季号', chapters=[
+            Chapter('春季号', '<h1>春季号</h1><h2>报道</h2><h3 id="古桥">同名</h3>'
+                    '<h2>栏目</h2><h4>同名</h4><p id="heading-5">正文</p>', path='a.xhtml'),
+            Chapter('访谈', '<h2>访谈</h2><h5>同名</h5>', level=2, path='b.xhtml'),
+        ])
+        candidates = toc_heading_choices(book)
+        self.assertEqual([item.index for item in candidates['a.xhtml']], [2, 3, 4, 5])
+        self.assertEqual([item.title for item in candidates['b.xhtml']], ['同名'])
+        staged = heading_toc(book, {('a.xhtml', 2), ('a.xhtml', 3), ('a.xhtml', 5)})
+        self.assertEqual([(e['title'], e['fragment'], e['level']) for e in current_toc(staged)], [
+            ('春季号', '', 1), ('报道', 'heading-2', 2), ('同名', '古桥', 3),
+            ('同名', 'heading-5-2', 2), ('访谈', '', 2),
+        ])
+        document = editable_chapter_document(staged, staged.chapters[0])
+        excluded = next(node for node in document.iter(f'{X}h2') if node.text == '栏目')
+        self.assertIsNone(excluded.get('id'))
+        self.assertEqual(staged.chapters[1].html, book.chapters[1].html)
+        self.assertNotIn('heading-5-2', book.chapters[0].html)
+        self.assertEqual(current_toc(heading_toc(book, set())), current_toc(book))
+
+    def test_legacy_named_anchor_is_reserved_when_generating_heading_id(self):
+        book = Book(chapters=[Chapter('首页', '<p><a name="heading-1">开头</a></p><h2>一节</h2>')])
+        self.assertEqual(heading_toc(book).toc_entries[1]['fragment'], 'heading-1-2')
 
     def test_split_imported_chapter_preserves_nested_wrapper_styles_and_cross_links(self):
         main, cross = 'OPS/main/long.xhtml', 'OPS/extras/refs.xhtml'

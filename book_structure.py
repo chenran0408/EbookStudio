@@ -149,7 +149,22 @@ def move_toc_entry(book: Book, index: int, direction: str, chapter: int) -> Stru
     return StructureEdit(result, chapter, f'已调整目录条目「{branch[0]["title"]}」的位置。', toc_index=position)
 
 
-def heading_toc(book: Book) -> Book:
+def _toc_headings(body, chapter_title):
+    for position, (node, title, rank) in enumerate(_headings(body), 1):
+        if position == 1 and title == (chapter_title or '未命名章节'):
+            continue
+        yield node, Heading(position, title, rank)
+
+
+def toc_heading_choices(book: Book) -> dict[str, list[Heading]]:
+    choices = {}
+    for chapter in book.chapters:
+        body = editable_chapter_document(book, chapter).find(_BODY)
+        choices[chapter.path] = [heading for _, heading in _toc_headings(body, chapter.title)]
+    return choices
+
+
+def heading_toc(book: Book, selected: set[tuple[str, int]] | None = None) -> Book:
     """Prepare a replacement navigation without mutating the source project."""
     result = deepcopy(book)
     result.toc_entries = []
@@ -158,22 +173,24 @@ def heading_toc(book: Book) -> Book:
         doc = editable_chapter_document(result, chapter)
         body = doc.find(_BODY)
         occupied = {value for node in doc.iter() for attr in _ID_ATTRIBUTES if (value := node.get(attr))}
-        depth = []
+        occupied.update(name for node in doc.iter(f'{{{XHTML}}}a') if (name := node.get('name')))
+        ancestors = []
         changed = False
-        for position, (node, title, rank) in enumerate(_headings(body), 1):
-            if position == 1 and title == entry['title']:
+        for node, heading in _toc_headings(body, chapter.title):
+            # Even an excluded heading ends the preceding sibling's branch.
+            while ancestors and ancestors[-1] >= heading.rank:
+                ancestors.pop()
+            if selected is not None and (chapter.path, heading.index) not in selected:
                 continue
-            while depth and depth[-1] >= rank:
-                depth.pop()
-            depth.append(rank)
+            ancestors.append(heading.rank)
             anchor = node.get('id') or node.get(f'{{{XML}}}id')
             if not anchor:
-                anchor = _unique_name(f'heading-{position}', occupied)
+                anchor = _unique_name(f'heading-{heading.index}', occupied)
                 occupied.add(anchor)
                 node.set('id', anchor)
                 changed = True
-            result.toc_entries.append(TocEntry(title=title, path=chapter.path, fragment=anchor,
-                                               level=chapter.level + len(depth)))
+            result.toc_entries.append(TocEntry(title=heading.title, path=chapter.path, fragment=anchor,
+                                               level=chapter.level + len(ancestors)))
         if changed:
             chapter.html = _inner(body)
     return result

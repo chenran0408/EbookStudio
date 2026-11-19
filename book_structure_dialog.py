@@ -4,15 +4,15 @@ from __future__ import annotations
 from copy import deepcopy
 
 from lxml import etree
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QPushButton,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog,
+    QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
 from book_structure import (
     StructureEdit, TocDestination, edit_toc_entry, heading_toc, merge_chapters, move_toc_entry,
-    split_chapter, split_choices, toc_destinations,
+    split_chapter, split_choices, toc_destinations, toc_heading_choices,
 )
 from epub_io import current_toc, is_fixed_layout
 
@@ -90,11 +90,95 @@ class TocEntryDialog(QDialog):
         self.message.setVisible(bool(self.message.text()))
 
 
+class TocHeadingsDialog(QDialog):
+    def __init__(self, parent, book, choices, selected=None):
+        super().__init__(parent)
+        self.setWindowTitle('选择目录标题')
+        self.resize(560, 430)
+        layout = QVBoxLayout(self)
+        hint = QLabel('章节名始终保留。按级别批量选择，或逐个勾选要放入目录的正文标题。')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        levels = QHBoxLayout()
+        levels.addWidget(QLabel('标题级别'))
+        self.levels = {}
+        self.rows = {}
+        for rank in range(1, 7):
+            button = QCheckBox(f'H{rank}')
+            button.setAccessibleName(f'{rank} 级标题 H{rank}')
+            button.setToolTip(f'勾选或清除全部 {rank} 级标题')
+            button.clicked.connect(lambda _checked, r=rank: self.toggle_level(r))
+            self.levels[rank] = button
+            self.rows[rank] = []
+            levels.addWidget(button)
+        levels.addStretch()
+        layout.addLayout(levels)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(['章节与正文标题', '级别'])
+        self.tree.setAccessibleName('选择要放入目录的正文标题')
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.tree, 1)
+        for chapter in book.chapters:
+            group = QTreeWidgetItem(self.tree, [chapter.title or '未命名章节', '章节'])
+            for heading in choices[chapter.path]:
+                key = (chapter.path, heading.index)
+                item = QTreeWidgetItem(group, [heading.title, f'H{heading.rank}'])
+                item.setToolTip(0, heading.title)
+                item.setCheckState(0, Qt.CheckState.Checked if selected is None or key in selected
+                                   else Qt.CheckState.Unchecked)
+                self.rows[heading.rank].append((key, item))
+        self.tree.expandAll()
+        self.status = QLabel(objectName='muted')
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+        preview = buttons.addButton('预览目录', QDialogButtonBox.ButtonRole.AcceptRole)
+        preview.setObjectName('primary')
+        preview.setDefault(True)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.tree.itemChanged.connect(self.refresh)
+        self.refresh()
+        self.tree.setFocus()
+
+    def selected(self):
+        return {key for group in self.rows.values() for key, item in group
+                if item.checkState(0) == Qt.CheckState.Checked}
+
+    def toggle_level(self, rank):
+        group = self.rows[rank]
+        select = any(item.checkState(0) != Qt.CheckState.Checked for _, item in group)
+        with QSignalBlocker(self.tree):
+            for _, item in group:
+                item.setCheckState(0, Qt.CheckState.Checked if select else Qt.CheckState.Unchecked)
+        self.refresh()
+
+    def refresh(self):
+        total = 0
+        selected = 0
+        for rank, group in self.rows.items():
+            count = sum(item.checkState(0) == Qt.CheckState.Checked for _, item in group)
+            state = Qt.CheckState.Unchecked
+            if count:
+                state = Qt.CheckState.Checked if count == len(group) else Qt.CheckState.PartiallyChecked
+            self.levels[rank].setCheckState(state)
+            self.levels[rank].setEnabled(bool(group))
+            total += len(group)
+            selected += count
+        self.status.setText(f'已选 {selected} / {total} 个正文标题。' if total
+                            else '没有可选的正文标题，目录将按章节生成。')
+
+
 class BookStructureDialog(QDialog):
     def __init__(self, parent, book, active):
         super().__init__(parent)
         self.book = book
         self.pending = None
+        self.heading_preview = None
         self.setWindowTitle('目录与章节')
         self.resize(670, 480)
         layout = QVBoxLayout(self)
@@ -263,8 +347,26 @@ class BookStructureDialog(QDialog):
         self.apply_button.setEnabled(True)
 
     def generate(self):
-        self.prepare(lambda: StructureEdit(heading_toc(self.draft), self.chapter.currentIndex(),
-                                           '用正文标题生成有层级的目录，并为缺少锚点的标题建立跳转。'))
+        source, selected = self.draft, None
+        if self.heading_preview and self.heading_preview[0] is self.pending:
+            _, source, selected = self.heading_preview
+        try:
+            choices = toc_heading_choices(source)
+        except (ValueError, etree.LxmlError) as error:
+            self.status.setText(str(error))
+            return
+        dialog = TocHeadingsDialog(self, source, choices, selected)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected()
+
+        def build_preview():
+            edit = StructureEdit(heading_toc(source, selected), self.chapter.currentIndex(),
+                                 f'已将 {len(selected)} 个正文标题加入目录预览。')
+            # Re-selecting headings in this preview starts from the same unmodified book.
+            self.heading_preview = (edit, source, selected)
+            return edit
+        self.prepare(build_preview)
 
     def default_toc(self):
         def reset():
