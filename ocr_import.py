@@ -3,6 +3,7 @@
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
+from hashlib import file_digest
 from html import escape
 from io import BytesIO
 import base64
@@ -40,6 +41,20 @@ INVALID_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 
 class OcrError(ValueError):
     """An OCR failure to report to the user."""
+
+
+def scan_digest(source: Path) -> str:
+    """Fingerprint the original scan without loading it all into memory."""
+    try:
+        with source.open("rb") as stream:
+            return file_digest(stream, "sha256").hexdigest()
+    except OSError as exc:
+        raise OcrError(f"无法读取扫描件 {source.name}：{exc}") from exc
+
+
+def scan_provenance(source: Path, digest: str, page: int, engine: str | None) -> dict:
+    """Record the absolute source path, SHA-256, 1-based page and OCR engine key."""
+    return {"path": str(source), "sha256": digest, "page": page, "engine": engine}
 
 
 def _page_numbers(selection: str, count: int) -> list[int]:
@@ -321,12 +336,13 @@ def ocr_book(
     model: str = DEFAULT_MODEL, max_tokens: int = MAX_TOKENS,
 ) -> Book:
     """Return a chapter per selected page in source order, with editable HTML."""
-    source = Path(path)
+    source = Path(path).expanduser().resolve()
     endpoint = _loopback(base_url)
     if not 1 <= max_tokens <= MAX_TOKENS:
         raise OcrError(f"识别词元上限应在 1 至 {MAX_TOKENS} 之间。")
     book = Book(title=source.stem)
     with scan_pages(source, pages) as (selected, read_image):
+        digest = scan_digest(source)
         if progress:
             progress(0, len(selected), "正在读取页面")
         for offset, page in enumerate(selected):
@@ -338,7 +354,10 @@ def ocr_book(
                     body = "<p>（空白页）</p>"
                 else:
                     body = _render_markdown(_recognize(png, endpoint, model, max_tokens))
-                book.chapters.append(Chapter(title=f"第 {page} 页", html=body))
+                book.chapters.append(Chapter(
+                    title=f"第 {page} 页", html=body,
+                    scan=scan_provenance(source, digest, page, "xiaomi"),
+                ))
             except (OSError, RuntimeError, ValueError) as exc:
                 raise OcrError(f"{source.name} 第 {page} 页：{exc}") from exc
             if progress:

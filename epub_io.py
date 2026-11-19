@@ -6,8 +6,8 @@ from hashlib import sha256
 from html import escape
 from io import BytesIO
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import urlsplit, urlunsplit
+from typing import Iterable, TypedDict
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 import re
 
@@ -35,6 +35,13 @@ td, th { border:1px solid; padding:0.25em; }
 pre { white-space:pre-wrap; }
 .cover { text-align:center; }
 '''
+
+
+class TocEntry(TypedDict):
+    title: str
+    path: str
+    fragment: str
+    level: int
 
 
 def _xml(data: bytes) -> etree._Element:
@@ -89,18 +96,22 @@ def _html_toc(doc: etree._Element) -> etree._Element | None:
                  if 'toc' in nav.get(f'{{{EPUB}}}type', '').split()), None)
 
 
-def _navigation(path: str, data: bytes, ncx: bool) -> dict[str, tuple[str, int]]:
-    labels = {}
+def _navigation_entries(path: str, data: bytes, ncx: bool) -> list[TocEntry]:
+    entries = []
     root = _xml(data)
+
+    def add(href, title, level):
+        target = resolve_href(path, href)
+        if target and title:
+            entries.append(TocEntry(title=title, path=target, fragment=unquote(urlsplit(href).fragment), level=level))
+
     if ncx:
         def read_points(parent, level):
             for point in parent.findall(f'{{{NCX}}}navPoint'):
                 address = point.find(f'{{{NCX}}}content')
-                if address is not None:
-                    file = resolve_href(path, address.get('src', ''))
+                if address is not None and (href := address.get('src')):
                     title = point.findtext(f'{{{NCX}}}navLabel/{{{NCX}}}text', '').strip()
-                    if file and title:
-                        labels.setdefault(file, (title, level))
+                    add(href, title, level)
                 read_points(point, level + 1)
         nav_map = root.find(f'{{{NCX}}}navMap')
         if nav_map is not None:
@@ -110,15 +121,20 @@ def _navigation(path: str, data: bytes, ncx: bool) -> dict[str, tuple[str, int]]
             for ordered in parent.findall(f'{{{XHTML}}}ol'):
                 for item in ordered.findall(f'{{{XHTML}}}li'):
                     anchor = item.find(f'{{{XHTML}}}a')
-                    if anchor is not None:
-                        file = resolve_href(path, anchor.get('href', ''))
+                    if anchor is not None and (href := anchor.get('href')):
                         title = ' '.join(''.join(anchor.itertext()).split())
-                        if file and title:
-                            labels.setdefault(file, (title, level))
+                        add(href, title, level)
                     read_list(item, level + 1)
         nav = _html_toc(root)
         if nav is not None:
             read_list(nav, 1)
+    return entries
+
+
+def _navigation(path: str, data: bytes, ncx: bool) -> dict[str, tuple[str, int]]:
+    labels = {}
+    for entry in _navigation_entries(path, data, ncx):
+        labels.setdefault(entry['path'], (entry['title'], entry['level']))
     return labels
 
 
@@ -275,6 +291,28 @@ def _set_body(body: etree._Element, fragment: str) -> None:
                 body.append(part)
 
 
+def editable_chapter_document(book: Book, chapter: Chapter) -> etree._Element:
+    """Return the export document with the current body, plus any imported head."""
+    original = book._epub_members.get(chapter.path) if chapter.path in book._epub_chapters else None
+    if original is None:
+        doc, body = _document(chapter.title, book.language)
+    else:
+        doc = _xml(original)
+        body = doc.find(f'{{{XHTML}}}body')
+    _set_body(body, chapter.html)
+    return doc
+
+
+def remember_chapter_document(book: Book, chapter: Chapter, doc: etree._Element) -> None:
+    body = doc.find(f'{{{XHTML}}}body')
+    chapter.html = _inner(body)
+    title = doc.find(f'{{{XHTML}}}head/{{{XHTML}}}title')
+    if title is not None:
+        title.text = chapter.title
+    book._epub_members[chapter.path] = _bytes(doc.getroottree())
+    book._epub_chapters[chapter.path] = (chapter.title, chapter.level, _digest(chapter.html))
+
+
 def _write_chapter(book: Book, chapter: Chapter, css: str) -> bytes:
     baseline = book._epub_chapters.get(chapter.path)
     if baseline:
@@ -300,14 +338,86 @@ def _write_chapter(book: Book, chapter: Chapter, css: str) -> bytes:
     return _bytes(doc)
 
 
-def _nav_tree(chapters: Iterable[Chapter]) -> list:
+def chapter_toc(chapters: Iterable[Chapter]) -> list[TocEntry]:
+    return [TocEntry(title=chapter.title or '未命名章节', path=chapter.path, fragment='', level=chapter.level)
+            for chapter in chapters]
+
+
+def original_navigation_paths(book: Book) -> tuple[str | None, str | None]:
+    package = book._epub_members.get(book._epub_path)
+    if package is None:
+        return None, None
+    manifest = _manifest(_xml(package), book._epub_path)
+    nav = next((path for path, item in manifest.values() if _has_property(item, 'nav')), None)
+    ncx = next((path for path, item in manifest.values() if item.get('media-type') == NCX_MEDIA), None)
+    return nav, ncx
+
+
+def _fill_new_chapters(book: Book, entries: list[TocEntry], choices: list[TocEntry]) -> list[TocEntry]:
+    original = book._epub_members.get(book._epub_path)
+    if original is None:
+        previous_paths = set()
+    else:
+        package = _xml(original)
+        manifest = _manifest(package, book._epub_path)
+        previous_paths = {manifest[ref.get('idref')][0] for ref in package.findall(f'{{{OPF}}}spine/{{{OPF}}}itemref')
+                          if ref.get('idref') in manifest}
+    covered = {entry['path'] for entry in entries}
+    order = {entry['path']: index for index, entry in enumerate(choices)}
+    for addition in choices:
+        path = addition['path']
+        if path not in covered and path not in previous_paths:
+            position = next((index for index, entry in enumerate(entries)
+                             if order.get(entry['path'], -1) > order[path]), len(entries))
+            entries.insert(position, addition)
+    return entries or choices
+
+
+def current_toc(book: Book) -> list[TocEntry]:
+    """Read the effective TOC without materializing an override in the project."""
+    choices = chapter_toc(book.chapters)
+    chapters = {chapter.path: chapter for chapter in book.chapters}
+    targets = chapters.keys() | {name for name, asset in book.assets.items() if asset.media_type == XHTML_MEDIA}
+    if book.toc_entries is not None:
+        entries = []
+        for entry in book.toc_entries:
+            if (not isinstance(entry, dict) or not all(isinstance(entry.get(key), str)
+                    for key in ('title', 'path', 'fragment')) or not isinstance(entry.get('level'), int)
+                    or entry['level'] < 1 or not entry['title'].strip()):
+                raise ValueError('自定义目录有无效的记录，请重新生成目录。')
+            if entry['path'] in targets:
+                entries.append(entry.copy())
+        return _fill_new_chapters(book, entries, choices)
+    nav, ncx = original_navigation_paths(book)
+    for path, legacy in ((nav, False), (ncx, True)):
+        if path is None:
+            continue
+        entries = [entry for entry in _navigation_entries(path, book._epub_members[path], legacy)
+                   if entry['path'] in targets]
+        if not entries:
+            continue
+        for entry in entries:
+            chapter = chapters.get(entry['path'])
+            original = book._epub_chapters.get(entry['path'])
+            if chapter and original and not entry['fragment'] and entry['title'] == original[0]:
+                entry['title'] = chapter.title or '未命名章节'
+        return _fill_new_chapters(book, entries, choices)
+    return choices
+
+
+def _toc_href(entry: TocEntry, document: str) -> str:
+    href = asset_href(entry['path'], document)
+    return f"{href}#{quote(entry['fragment'], safe='')}" if entry['fragment'] else href
+
+
+def _nav_tree(entries: Iterable[TocEntry]) -> list:
     root = []
     stack = [root]
-    for chapter in chapters:
-        level = min(max(1, chapter.level), len(stack))
+    for entry in entries:
+        level = min(max(1, entry['level']), len(stack))
         stack = stack[:level]
         children = []
-        stack[-1].append((chapter, children))
+        stack[-1].append((entry, children))
         stack.append(children)
     return root
 
@@ -326,9 +436,9 @@ def _write_nav(title: str, language: str, path: str, tree: list,
     new_toc.set('id', toc.get('id', 'toc') if toc is not None else 'toc')
     _put(new_toc, f'{{{XHTML}}}h1', '目录')
     def add(parent, group):
-        for chapter, children in group:
+        for entry, children in group:
             item = _put(parent, f'{{{XHTML}}}li')
-            _put(item, f'{{{XHTML}}}a', chapter.title, href=asset_href(chapter.path, path))
+            _put(item, f'{{{XHTML}}}a', entry['title'], href=_toc_href(entry, path))
             if children:
                 add(_put(item, f'{{{XHTML}}}ol'), children)
     add(_put(new_toc, f'{{{XHTML}}}ol'), tree)
@@ -340,7 +450,7 @@ def _write_nav(title: str, language: str, path: str, tree: list,
         if previous is not None:
             doc, body = _document(title, language)
         body.append(new_toc)
-    return _bytes(doc)
+    return _bytes(doc.getroottree())
 
 
 def _nav_from_ncx(book: Book, path: str, ncx_path: str, data: bytes) -> bytes:
@@ -367,7 +477,7 @@ def _nav_from_ncx(book: Book, path: str, ncx_path: str, data: bytes) -> bytes:
     return _bytes(doc)
 
 
-def _write_ncx(book: Book, path: str, tree: list) -> bytes:
+def _write_ncx(book: Book, path: str, tree: list, previous: bytes | None = None) -> bytes:
     doc = etree.Element(f'{{{NCX}}}ncx', nsmap={None: NCX}, version='2005-1')
     doc.set(f'{{{XML}}}lang', book.language)
     head = _put(doc, f'{{{NCX}}}head')
@@ -382,13 +492,24 @@ def _write_ncx(book: Book, path: str, tree: list) -> bytes:
     order = 0
     def add(parent, group):
         nonlocal order
-        for chapter, children in group:
+        for entry, children in group:
             order += 1
             point = _put(parent, f'{{{NCX}}}navPoint', id=f'chapter-{order}', playOrder=str(order))
-            _put(_put(point, f'{{{NCX}}}navLabel'), f'{{{NCX}}}text', chapter.title)
-            _put(point, f'{{{NCX}}}content', src=asset_href(chapter.path, path))
+            _put(_put(point, f'{{{NCX}}}navLabel'), f'{{{NCX}}}text', entry['title'])
+            _put(point, f'{{{NCX}}}content', src=_toc_href(entry, path))
             add(point, children)
     add(_put(doc, f'{{{NCX}}}navMap'), tree)
+    if previous:
+        for element in _xml(previous):
+            if element.tag in (f'{{{NCX}}}pageList', f'{{{NCX}}}navList'):
+                # Keep the original auxiliary targets and their IDs. Omit playOrder
+                # everywhere when joining a newly generated table and old lists.
+                for node in element.iter():
+                    node.attrib.pop('playOrder', None)
+                doc.append(element)
+        if doc.find(f'{{{NCX}}}pageList') is not None or doc.find(f'{{{NCX}}}navList') is not None:
+            for point in doc.iter(f'{{{NCX}}}navPoint'):
+                point.attrib.pop('playOrder', None)
     return _bytes(doc)
 
 
@@ -477,6 +598,33 @@ def _package(book: Book) -> tuple[etree._Element, etree._Element,
     return package, metadata, previous
 
 
+def _fixed_layout(package: etree._Element) -> bool:
+    layout = package.findtext(f'{{{OPF}}}metadata/{{{OPF}}}meta[@property="rendition:layout"]', '')
+    return (layout.strip() == 'pre-paginated'
+            or any(_has_property(ref, 'rendition:layout-pre-paginated')
+                   for ref in package.findall(f'{{{OPF}}}spine/{{{OPF}}}itemref')))
+
+
+def is_fixed_layout(book: Book) -> bool:
+    package = book._epub_members.get(book._epub_path)
+    return package is not None and _fixed_layout(_xml(package))
+
+
+def _check_toc_anchors(entries, documents, assets):
+    anchors_by_path = {}
+    for entry in entries:
+        fragment = entry['fragment']
+        if not fragment:
+            continue
+        path = entry['path']
+        if path not in anchors_by_path:
+            data = documents[path] if path in documents else assets[path].data
+            doc = _xml(data)
+            anchors_by_path[path] = set(doc.xpath('//@id | //@xml:id | //x:a/@name', namespaces={'x': XHTML}))
+        if fragment not in anchors_by_path[path]:
+            raise ValueError(f'目录项「{entry["title"]}」的锚点 #{fragment} 已不存在，请重新生成目录。')
+
+
 def write_epub(book: Book, path: str | Path, *, mobile: bool = True) -> None:
     if not book.chapters:
         raise ValueError('请至少添加一个章节')
@@ -490,7 +638,8 @@ def write_epub(book: Book, path: str | Path, *, mobile: bool = True) -> None:
         raise ValueError('章节和资源不能占用 EPUB 保留路径')
     occupied = set(names) | assets.keys() | set(book._epub_members)
     opf_path = book._epub_path or _unique('package.opf', occupied)
-    package, metadata, previous = _package(book)
+    package, _, previous = _package(book)
+    fixed_layout = _fixed_layout(package)
     previous_spine = package.find(f'{{{OPF}}}spine')
     old_refs = {} if previous_spine is None else {
         item.get('idref'): dict(item.attrib) for item in previous_spine.findall(f'{{{OPF}}}itemref')
@@ -506,7 +655,8 @@ def write_epub(book: Book, path: str | Path, *, mobile: bool = True) -> None:
     if any(chapter.path not in book._epub_chapters for chapter in book.chapters):
         css_path = _unique('styles/book.css', occupied)
         assets[css_path] = Asset(CSS + b'\n' + book.stylesheet.encode('utf-8'), 'text/css')
-    tree = _nav_tree(book.chapters)
+    entries = chapter_toc(book.chapters) if book.toc_entries is None else current_toc(book)
+    tree = _nav_tree(entries)
     unchanged_toc_structure = [(c.path, c.level) for c in book.chapters] == [
         (name, book._epub_chapters[name][1]) for name in original_spine
     ]
@@ -515,7 +665,12 @@ def write_epub(book: Book, path: str | Path, *, mobile: bool = True) -> None:
     documents = {chapter.path: _write_chapter(book, chapter, css_path) for chapter in book.chapters}
     original_nav = book._epub_members.get(old_nav)
     original_ncx = book._epub_members.get(old_ncx)
-    if old_nav and unchanged_toc_structure and _navigation(old_nav, original_nav, False):
+    if book.toc_entries is not None:
+        _check_toc_anchors(entries, documents, assets)
+        documents[nav_path] = _write_nav(book.title, book.language, nav_path, tree, original_nav)
+        if old_ncx:
+            documents[old_ncx] = _write_ncx(book, old_ncx, tree, original_ncx)
+    elif old_nav and unchanged_toc_structure and _navigation(old_nav, original_nav, False):
         documents[nav_path] = _rename_navigation(nav_path, original_nav, renamed)
         if old_ncx:
             documents[old_ncx] = _rename_navigation(old_ncx, original_ncx, renamed, ncx=True)
@@ -617,9 +772,6 @@ def write_epub(book: Book, path: str | Path, *, mobile: bool = True) -> None:
     container = etree.Element(f'{{{CONTAINER}}}container', nsmap={None: CONTAINER}, version='1.0')
     _put(_put(container, f'{{{CONTAINER}}}rootfiles'), f'{{{CONTAINER}}}rootfile',
          **{'full-path': opf_path, 'media-type': 'application/oebps-package+xml'})
-    fixed_layout = (metadata.findtext(f'{{{OPF}}}meta[@property="rendition:layout"]', '').strip() == 'pre-paginated'
-                    or any('rendition:layout-pre-paginated' in ref.get('properties', '').split()
-                           for ref in old_refs.values()))
     with publish_file(path) as temporary, ZipFile(temporary, 'w', ZIP_DEFLATED) as archive:
         archive.writestr('mimetype', MIMETYPE, compress_type=ZIP_STORED)
         archive.writestr('META-INF/container.xml', _bytes(container))

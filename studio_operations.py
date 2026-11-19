@@ -132,14 +132,14 @@ def read_book(path: Path) -> Book:
         return open_epub(intermediate)
 
 
-def capture_pages(urls, rendered, *, progress=None):
+def capture_pages(urls, rendered, *, progress=None, article_xpath=''):
     book, failures = Book(), []
     for index, url in enumerate(urls):
         if progress:
             progress(index, len(urls), f"正在采集第 {index + 1} 篇")
         try:
             warnings = []
-            chapter, assets = capture.capture(url, rendered=rendered, warnings=warnings)
+            chapter, assets = capture.capture(url, rendered=rendered, warnings=warnings, article_xpath=article_xpath)
             book.chapters.append(chapter)
             book.assets.update(assets)
             failures.extend(f"{chapter.title} · {item}" for item in warnings)

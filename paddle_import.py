@@ -11,7 +11,7 @@ import sys
 from tempfile import TemporaryDirectory
 
 from ebook_core import Book
-from ocr_import import OcrError, scan_pages, scan_rgb
+from ocr_import import OcrError, scan_digest, scan_pages, scan_provenance, scan_rgb
 from paddle_content import paddle_chapter
 
 DEFAULT_PYTHON = Path(r"D:\Dev\SDKs\EbookStudio-PaddleOCR\Scripts\python.exe")
@@ -35,7 +35,7 @@ def _external_dll_search():
 
 
 def paddle_book(path: str | Path, *, pages: str = "", progress=None) -> Book:
-    source = Path(path)
+    source = Path(path).expanduser().resolve()
     python = Path(os.environ.get("EBOOK_STUDIO_PADDLE_PYTHON", str(DEFAULT_PYTHON)))
     if not python.is_file():
         raise OcrError("未找到 PaddleOCR-VL-1.6 运行环境。可在使用说明中查看安装和路径配置。")
@@ -51,6 +51,7 @@ def paddle_book(path: str | Path, *, pages: str = "", progress=None) -> Book:
     with TemporaryDirectory(prefix="ebook-studio-paddle-") as directory:
         work = Path(directory)
         with scan_pages(source, pages, pdf_max_edge=3000) as (selected, read_image):
+            digest = scan_digest(source)
             if progress:
                 progress(0, len(selected), "正在读取页面")
             for page in selected:
@@ -82,6 +83,7 @@ def paddle_book(path: str | Path, *, pages: str = "", progress=None) -> Book:
             chapter, images = paddle_chapter(
                 data["markdown"], {key: work / value for key, value in data["images"].items()}, page,
             )
+            chapter.scan = scan_provenance(source, digest, page, "paddle")
             book.chapters.append(chapter)
             book.assets.update(images)
     return book

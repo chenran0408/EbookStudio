@@ -85,6 +85,8 @@ class Chapter:
     level: int = 1
     source: str = ''
     path: str = field(default_factory=lambda: f'chapter-{uuid4().hex}.xhtml')
+    scan: dict | None = None
+    web: dict | None = None
 
 
 @dataclass
@@ -97,11 +99,21 @@ class Book:
     cover: str | None = None
     identifier: str = field(default_factory=lambda: f'urn:uuid:{uuid4()}')
     stylesheet: str = ''
+    toc_entries: list[dict] | None = None
+    capture_profiles: list[dict] = field(default_factory=list)
     _epub_path: str | None = field(default=None, repr=False)
     _epub_members: dict[str, bytes] = field(default_factory=dict, repr=False)
     _epub_chapters: dict[str, tuple[str, int, str]] = field(default_factory=dict, repr=False)
 
     def save(self, path: str | Path) -> None:
+        chapter_rows = []
+        chapter_context = {}
+        for chapter in self.chapters:
+            row = asdict(chapter)
+            context = {key: value for key in ('scan', 'web') if (value := row.pop(key)) is not None}
+            if context:
+                chapter_context[chapter.path] = context
+            chapter_rows.append(row)
         data = {
             'version': 1,
             'title': self.title,
@@ -109,7 +121,10 @@ class Book:
             'language': self.language,
             'identifier': self.identifier,
             'stylesheet': self.stylesheet,
-            'chapters': [asdict(chapter) for chapter in self.chapters],
+            'chapters': chapter_rows,
+            'chapter_context': chapter_context,
+            'toc_entries': self.toc_entries,
+            'capture_profiles': self.capture_profiles,
             'assets': {name: asset.media_type for name, asset in self.assets.items()},
             'cover': self.cover,
             'epub_path': self._epub_path,
@@ -129,13 +144,21 @@ class Book:
             data = json.loads(project.read('project.json'))
             if data.get('version') != 1:
                 raise ValueError('此版本无法打开该书籍工程')
+            chapter_context = data.get('chapter_context', {})
+            chapters = [Chapter(**row) for row in data['chapters']]
+            for chapter in chapters:
+                context = chapter_context.get(chapter.path, {})
+                chapter.scan = context.get('scan')
+                chapter.web = context.get('web')
             return cls(
                 title=data['title'],
                 author=data['author'],
                 language=data['language'],
                 identifier=data['identifier'],
                 stylesheet=data.get('stylesheet', ''),
-                chapters=[Chapter(**chapter) for chapter in data['chapters']],
+                chapters=chapters,
+                toc_entries=data.get('toc_entries'),
+                capture_profiles=data.get('capture_profiles', []),
                 assets={
                     name: Asset(project.read(f'assets/{archive_path(name)}'), media)
                     for name, media in data['assets'].items()

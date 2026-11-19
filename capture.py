@@ -6,11 +6,12 @@ import base64
 import binascii
 import hashlib
 import ipaddress
+import json
 import re
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import unquote_to_bytes, urldefrag, urljoin, urlsplit
+from urllib.parse import unquote_to_bytes, urldefrag, urljoin, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
 import requests
@@ -90,6 +91,17 @@ def _web_url(value: str) -> str:
     if parsed.scheme not in _WEB or not parsed.hostname or parsed.username is not None:
         raise CaptureError("请输入完整的 HTTP 或 HTTPS 网址。")
     return value
+
+
+def web_url_key(value: str) -> str:
+    """Identify a public article independently of its page fragment."""
+    url = urlsplit(_web_url(value))
+    return urlunsplit((url.scheme, url.netloc.lower(), url.path or '/', url.query, ''))
+
+
+def web_revision(chapter: Chapter) -> str:
+    data = json.dumps([chapter.title, chapter.html], ensure_ascii=False).encode('utf-8')
+    return hashlib.sha256(data).hexdigest()
 
 
 def _download(url: str, limit: int) -> tuple[bytes, str, str, str | None]:
@@ -186,6 +198,18 @@ def _first_content(document, selectors):
     return None
 
 
+def _rule_node(document, selector: str, label: str):
+    try:
+        nodes = document.xpath(selector)
+    except etree.XPathError as exc:
+        raise CaptureError(f'{label} XPath 无效：{exc}') from exc
+    if isinstance(nodes, list):
+        for node in nodes:
+            if isinstance(node, lhtml.HtmlElement):
+                return node
+    raise CaptureError(f'{label}规则没有匹配到页面元素。')
+
+
 def _drop_chrome(root, *, qiushi: bool) -> None:
     for node in list(root.iterdescendants()):
         if node.getparent() is None:
@@ -236,19 +260,21 @@ def _content_root(document, base_url: str, local: bool):
     return root if root is not None else document.find("body")
 
 
-def discover(url: str, *, rendered: bool = False) -> list[Candidate]:
+def discover(url: str, *, rendered: bool = False, directory_xpath: str = '') -> list[Candidate]:
     """List links on a directory page. No linked page is fetched here."""
     raw_html, base_url = _load_page(url, rendered)
     document = _document(raw_html)
     qiushi = _qiushi(base_url)
-    body = _first_content(document, _QIUSHI_CONTENT) if qiushi else None
+    body = _rule_node(document, directory_xpath, '目录') if directory_xpath else None
+    if body is None and qiushi:
+        body = _first_content(document, _QIUSHI_CONTENT)
     if body is None:
         body = _first_content(document, ("//main", '//*[@role="main"]', "//article", "//body"))
     if body is None:
         return []
     _drop_chrome(body, qiushi=qiushi)
     candidates: dict[str, Candidate] = {}
-    for anchor in body.xpath(".//a[@href]"):
+    for anchor in body.xpath("descendant-or-self::a[@href]"):
         label = _text(anchor)
         link = urldefrag(urljoin(base_url, anchor.get("href").strip()))[0]
         parts = urlsplit(link)
@@ -468,7 +494,7 @@ def _normalize(root, base_url: str) -> str:
 
 
 def capture_html(raw_html: str | bytes, base_url: str = "", title: str = "", *,
-                 warnings: list[str] | None = None) -> tuple[Chapter, dict[str, Asset]]:
+                 warnings: list[str] | None = None, article_xpath: str = '') -> tuple[Chapter, dict[str, Asset]]:
     """Extract a single chapter and return chapter-relative asset references.
 
     Provide a file URI for local HTML, its HTTP(S) URL for a web snapshot, or
@@ -479,7 +505,7 @@ def capture_html(raw_html: str | bytes, base_url: str = "", title: str = "", *,
     local_root = None
     if urlsplit(base_url).scheme == "file":
         local_root = Path(url2pathname(urlsplit(base_url).path)).resolve().parent
-    root = _content_root(document, base_url, local)
+    root = _rule_node(document, article_xpath, '正文') if article_xpath else _content_root(document, base_url, local)
     if root is None:
         raise CaptureError("页面没有正文。")
     if not title.strip():
@@ -498,10 +524,13 @@ def capture_html(raw_html: str | bytes, base_url: str = "", title: str = "", *,
 
 
 def capture(url: str, *, rendered: bool = False,
-            warnings: list[str] | None = None) -> tuple[Chapter, dict[str, Asset]]:
+            warnings: list[str] | None = None, article_xpath: str = '') -> tuple[Chapter, dict[str, Asset]]:
     """Fetch only the specified article and its images."""
     raw_html, final_url = _load_page(url, rendered)
-    return capture_html(raw_html, final_url, warnings=warnings)
+    chapter, assets = capture_html(raw_html, final_url, warnings=warnings, article_xpath=article_xpath)
+    revision = web_revision(chapter)
+    chapter.web = {'url': web_url_key(url), 'remote': revision, 'local': revision}
+    return chapter, assets
 
 
 def capture_file(path: str | Path, *,

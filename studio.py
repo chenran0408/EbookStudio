@@ -19,7 +19,7 @@ from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence, QShort
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
-    QApplication, QBoxLayout, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QApplication, QBoxLayout, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTabBar, QTabWidget,
@@ -28,11 +28,17 @@ from PySide6.QtWidgets import (
 
 from book_info import BookInfoDialog
 from book_quality_dialog import show_book_quality
+from book_resources_dialog import show_book_resources
+from book_revision_dialogs import show_book_checkpoints, show_book_replace
 from book_search import select_search_result
+from book_structure_dialog import show_book_structure
 from ebook_core import Asset, Book, Chapter, asset_href, resolve_href
 import capture
+from capture_review import CaptureProfilesDialog, WebUpdateDialog
+from capture_update import CaptureProfile, apply_updates, collect_updates, profiles_for, remember_profile
 import conversion
 from ocr_import import DEFAULT_MODEL, IMAGE_TYPES as SCAN_IMAGE_TYPES, ocr_book
+from ocr_review import show_ocr_review
 from ocr_runtime import local_server
 from paddle_import import paddle_book
 from studio_dialogs import ExportDialog, ScanDialog
@@ -195,12 +201,15 @@ def add_asset(book: Book, path: Path, chapter: Chapter | None = None):
 
 
 class CaptureDialog(QDialog):
-    def __init__(self, fetch, parent):
+    def __init__(self, fetch, parent, *, profile=None, configure=False):
         super().__init__(parent)
         self.setWindowTitle("从网页采集")
         self.resize(650, 420)
         self.fetch = fetch
         self.task = None
+        self.profile = profile
+        self.configure = configure
+        self.skipped = set(profile.skipped) if profile else set()
         self.tabs = QTabWidget()
         articles = QWidget()
         direct = QVBoxLayout(articles)
@@ -242,17 +251,53 @@ class CaptureDialog(QDialog):
         self.tabs.addTab(directory, "从目录选文章")
 
         self.rendered = QCheckBox("网页内容加载不全时，使用浏览器渲染")
+        self.options = QPushButton("提取规则（可选）", checkable=True)
+        rules = QWidget()
+        form = QFormLayout(rules)
+        form.setContentsMargins(0, 0, 0, 0)
+        self.article_xpath = QLineEdit()
+        self.article_xpath.setPlaceholderText("例如 //main//article")
+        self.article_xpath.setAccessibleName("正文 XPath")
+        form.addRow("正文 XPath", self.article_xpath)
+        self.directory_xpath = QLineEdit()
+        self.directory_xpath.setPlaceholderText("例如 //div[@id='contents']")
+        self.directory_xpath.setAccessibleName("目录 XPath")
+        form.addRow("目录 XPath", self.directory_xpath)
+        self.rule_notice = QLabel(objectName="muted")
+        self.rule_notice.setWordWrap(True)
+        form.addRow(self.rule_notice)
+        rules.hide()
+        self.options.toggled.connect(rules.setVisible)
+        self.save_selection = QCheckBox("保存规则和文章选择，供增量更新")
+        self.save_selection.setChecked(configure)
+        self.save_selection.setVisible(not configure)
         self.actions = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.actions.accepted.connect(self.accept)
         self.actions.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
         layout.addWidget(self.tabs, 1)
+        layout.addWidget(self.options, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(rules)
         layout.addWidget(self.rendered)
+        layout.addWidget(self.save_selection)
         layout.addWidget(self.actions)
         self.tabs.currentChanged.connect(self.update_actions)
         self.urls.textChanged.connect(self.update_actions)
         self.directory.textChanged.connect(self.directory_edited)
+        self.directory_xpath.textChanged.connect(self.directory_edited)
         self.candidates.itemChanged.connect(self.update_actions)
+        if profile is not None:
+            self.rendered.setChecked(profile.rendered)
+            self.article_xpath.setText(profile.article_xpath)
+            self.directory_xpath.setText(profile.directory_xpath)
+            self.options.setChecked(bool(profile.article_xpath or profile.directory_xpath))
+            if profile.directory:
+                self.tabs.setCurrentIndex(1)
+                self.directory.setText(profile.directory)
+                self.found([capture.Candidate(url, url) for url in [*profile.urls, *profile.skipped]])
+                self.notice.setText("已载入保存的选择。点查找文章可更新当前目录。")
+            else:
+                self.urls.setPlainText("\n".join(profile.urls))
         self.update_actions()
 
     def directory_edited(self, _text):
@@ -265,7 +310,7 @@ class CaptureDialog(QDialog):
         self.url_notice.setText(f"{len(urls)} 篇待导入" if urls and self.tabs.currentIndex() == 0 else "")
         button = self.actions.button(QDialogButtonBox.StandardButton.Ok)
         button.setEnabled(bool(urls) and not self.task)
-        button.setText(f"导入 {len(urls)} 篇" if urls else "导入")
+        button.setText("保存规则" if self.configure else f"导入 {len(urls)} 篇" if urls else "导入")
         self.find_button.setEnabled(bool(self.directory.text().strip()) and not self.task)
 
     def check_candidates(self, checked):
@@ -287,13 +332,18 @@ class CaptureDialog(QDialog):
             return
         self.notice.setText("正在识别章节…")
         rendered = self.rendered.isChecked()
-        self.task = Task(lambda: self.fetch(url, rendered=rendered), self)
+        if self.candidates.count():
+            self.skipped = set(self.unselected_urls())
+        selector = self.directory_xpath.text().strip()
+        options = {"directory_xpath": selector} if selector else {}
+        self.task = Task(lambda: self.fetch(url, rendered=rendered, **options), self)
         self.task.result.connect(self.found)
         self.task.failure.connect(self.notice.setText)
         self.task.finished.connect(self.clear_task)
         self.actions.setEnabled(False)
         self.tabs.setEnabled(False)
         self.rendered.setEnabled(False)
+        self.directory_xpath.setEnabled(False)
         self.task.start()
 
     def clear_task(self):
@@ -302,6 +352,7 @@ class CaptureDialog(QDialog):
         self.actions.setEnabled(True)
         self.tabs.setEnabled(True)
         self.rendered.setEnabled(True)
+        self.directory_xpath.setEnabled(True)
         self.update_actions()
 
     def found(self, values):
@@ -310,7 +361,8 @@ class CaptureDialog(QDialog):
             item = QListWidgetItem(candidate.title)
             item.setToolTip(candidate.url)
             item.setData(Qt.ItemDataRole.UserRole, candidate.url)
-            item.setCheckState(Qt.CheckState.Checked)
+            state = Qt.CheckState.Unchecked if capture.web_url_key(candidate.url) in self.skipped else Qt.CheckState.Checked
+            item.setCheckState(state)
             self.candidates.addItem(item)
         self.notice.setText(f"找到 {len(values)} 个候选链接，请核对后勾选。")
         self.update_actions()
@@ -325,6 +377,24 @@ class CaptureDialog(QDialog):
             ]
         return list(dict.fromkeys(urls))
 
+    def unselected_urls(self):
+        return [capture.web_url_key(item.data(Qt.ItemDataRole.UserRole))
+                for index in range(self.candidates.count())
+                if (item := self.candidates.item(index)).checkState() != Qt.CheckState.Checked]
+
+    def capture_profile(self):
+        from_directory = self.tabs.currentIndex() == 1
+        options = {'identifier': self.profile.identifier} if self.profile else {}
+        return CaptureProfile(
+            self.selected_urls(),
+            directory=self.directory.text().strip() if from_directory else '',
+            skipped=self.unselected_urls() if from_directory else [],
+            rendered=self.rendered.isChecked(),
+            article_xpath=self.article_xpath.text().strip(),
+            directory_xpath=self.directory_xpath.text().strip(),
+            **options,
+        )
+
     def accept(self):
         urls = self.selected_urls()
         if urls and not self.task:
@@ -335,6 +405,15 @@ class CaptureDialog(QDialog):
                     self.url_notice.setText("有网址格式不正确，请检查是否以 http:// 或 https:// 开头。")
                     self.urls.setFocus()
                     return
+            for field in (self.article_xpath, self.directory_xpath):
+                if field.text().strip():
+                    try:
+                        etree.XPath(field.text().strip())
+                    except etree.XPathError:
+                        self.options.setChecked(True)
+                        self.rule_notice.setText("XPath 语法不正确，请修改后重试。")
+                        field.setFocus()
+                        return
             super().accept()
 
     def reject(self):
@@ -422,6 +501,7 @@ class Studio(QMainWindow):
         source_menu = QMenu(self.import_button)
         source_menu.addAction("从文件追加章节…", self.import_files)
         source_menu.addAction("从网页追加章节…", self.capture_urls)
+        source_menu.addAction("网页增量采集…", self.open_web_profiles)
         self.import_button.setMenu(source_menu)
         actions.addWidget(self.import_button)
         self.save_button = QPushButton("保存工程")
@@ -615,6 +695,11 @@ class Studio(QMainWindow):
         self.recent_menu = file_menu.addMenu("最近打开")
         self.recent_menu.aboutToShow.connect(self.refresh_recent_menu)
         file_menu.addAction("恢复草稿…", self.choose_recovery)
+        revision_menu = self.menuBar().addMenu("校对")
+        self.replace_text_action = revision_menu.addAction("整书查找替换…", lambda: show_book_replace(self))
+        self.replace_text_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
+        self.checkpoints_action = revision_menu.addAction("检查点…", lambda: show_book_checkpoints(self))
+        self.ocr_review_action = revision_menu.addAction("OCR 原图对照…", self.review_current_scan)
         view_menu = self.menuBar().addMenu("视图")
         view_menu.addAction("开始页", self.show_start)
         jump = view_menu.addAction("搜索章节标题", self.focus_chapter_filter)
@@ -624,6 +709,9 @@ class Studio(QMainWindow):
         convert_menu = self.menuBar().addMenu("出书")
         convert_menu.addAction("导入章节文件", self.import_files)
         convert_menu.addAction("识别扫描 PDF 或图片", self.import_scan)
+        self.structure_action = convert_menu.addAction("目录和章节管理…", self.manage_book_structure)
+        self.resources_action = convert_menu.addAction("书稿资源…", self.manage_book_resources)
+        self.web_update_action = convert_menu.addAction("网页增量采集…", self.open_web_profiles)
         convert_menu.addAction("编辑样式表", self.edit_stylesheet)
         convert_menu.addAction("批量转换格式", self.batch_convert)
         convert_menu.addAction("导出 EPUB 或其他格式", self.export)
@@ -872,6 +960,11 @@ class Studio(QMainWindow):
         self.project_state.setVisible(showing_book)
         self.project_state.setText(state)
         self.search_text_action.setEnabled(self.book_started)
+        for action in (self.checkpoints_action, self.resources_action, self.web_update_action):
+            action.setEnabled(self.book_started)
+        ready = self.book_started and bool(self.book.chapters)
+        for action in (self.replace_text_action, self.ocr_review_action, self.structure_action):
+            action.setEnabled(ready)
         self.export_button.setEnabled(bool(self.book.chapters))
         self.screens.setCurrentWidget(self.split if showing_book else self.welcome)
 
@@ -982,6 +1075,18 @@ class Studio(QMainWindow):
 
     def check_book_quality(self):
         self.flush_current_edits(lambda: show_book_quality(self))
+
+    def review_current_scan(self):
+        self.show_book()
+        show_ocr_review(self, checkpoint=self.workspace.save_checkpoint)
+
+    def manage_book_structure(self):
+        self.show_book()
+        self.flush_current_edits(lambda: show_book_structure(self))
+
+    def manage_book_resources(self):
+        self.show_book()
+        self.flush_current_edits(lambda: show_book_resources(self))
 
     def update_chapter_operations(self):
         active = self.chapter() is not None
@@ -1330,6 +1435,16 @@ class Studio(QMainWindow):
         self.preferred_mode = "rich"
         self.reload()
 
+    def adopt_book_edit(self, book, row=None):
+        """Keep the current project location and adopt a reviewed edit in memory."""
+        self.book = book
+        self.source_document = None
+        self.show_book()
+        row = self.active if row is None else row
+        self.chapter_filter.clear()
+        self.changed()
+        self.reload(max(0, min(row, len(book.chapters) - 1)))
+
     def open(self):
         name, _ = QFileDialog.getOpenFileName(self, "打开书籍或稿件", "", FILE_FILTER)
         if name:
@@ -1409,27 +1524,66 @@ class Studio(QMainWindow):
         dialog = CaptureDialog(capture.discover, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        urls = dialog.selected_urls()
+        profile = dialog.capture_profile()
+        urls = profile.urls
         if urls:
             start_new_book = self.showing_start and self.book_started
             if start_new_book and not self.can_leave():
                 return
-            rendered = dialog.rendered.isChecked()
+            saved_profile = profile if dialog.save_selection.isChecked() else None
             self.start_task("正在采集网页并保存离线图片…",
-                            lambda progress: capture_pages(urls, rendered, progress=progress),
-                            lambda result: self.captured(result, start_new_book=start_new_book), reports_progress=True)
+                            lambda progress: capture_pages(urls, profile.rendered, progress=progress,
+                                                           article_xpath=profile.article_xpath),
+                            lambda result: self.captured(result, start_new_book=start_new_book, profile=saved_profile),
+                            reports_progress=True)
 
-    def captured(self, result, *, start_new_book=False):
+    def captured(self, result, *, start_new_book=False, profile=None):
         books, notices = result
         if books:
             if start_new_book:
                 self.replace_book(Book(), None)
+            if profile is not None:
+                remember_profile(self.book, profile)
             self.imported(books)
         if notices:
             if books:
                 self.warning("采集结果", "正文已导入，有些链接或图片需要核对。", "\n".join(notices))
             else:
                 self.warning("采集未完成", "没有取得可以导入的章节。", "\n".join(notices))
+
+    def open_web_profiles(self):
+        self.flush_current_edits(self._choose_web_profile)
+
+    def _choose_web_profile(self):
+        profiles = profiles_for(self.book)
+        dialog = CaptureProfilesDialog(self, profiles)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        profile = dialog.selected_profile() if dialog.operation != 'new' else None
+        if dialog.operation != 'refresh':
+            editor = CaptureDialog(capture.discover, self, profile=profile, configure=True)
+            if editor.exec() != QDialog.DialogCode.Accepted:
+                return
+            profile = editor.capture_profile()
+            remember_profile(self.book, profile)
+            self.changed()
+        if profile:
+            self.start_task("正在核对网页更新…", lambda progress: collect_updates(self.book, profile, progress=progress),
+                            lambda result: self._review_web_updates(profile, result), reports_progress=True)
+
+    def _review_web_updates(self, profile, result):
+        updates, directory_notice = result
+        dialog = WebUpdateDialog(self, self.book, updates, directory_notice)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not (chosen := dialog.chosen()):
+            return
+        try:
+            edited, first_row = apply_updates(self.book, chosen, profile)
+            self.workspace.save_checkpoint(self.book, "网页增量更新前")
+        except (OSError, ValueError) as exc:
+            self.error(str(exc))
+            return
+        self.adopt_book_edit(edited, first_row)
+        self.statusBar().showMessage(f"已应用 {len(chosen)} 篇网页更新，可从检查点恢复。")
 
     def export(self):
         if not self.book.chapters:

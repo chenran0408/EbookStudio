@@ -1,13 +1,16 @@
-"""Local recent projects and recoverable drafts for each editor window."""
+"""Local recent projects, recoverable drafts, and book checkpoints."""
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from errno import EACCES, EAGAIN, EDEADLK
+from hashlib import sha256
 from pathlib import Path
 from threading import Lock
 from typing import BinaryIO, Iterator
 from uuid import uuid4
-from zipfile import BadZipFile, ZipFile
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 import json
 import os
 import re
@@ -16,6 +19,20 @@ from ebook_core import Book, publish_file
 
 _RECENT_LIMIT = 12
 _DRAFT_NAME = re.compile(r'draft-[0-9a-f]{32}\.bookproj\Z')
+
+
+_CHECKPOINT_NAME = re.compile(r'checkpoint-[0-9a-f]{32}\.bookproj\Z')
+_CHECKPOINT_METADATA = 'checkpoint.json'
+
+
+@dataclass(frozen=True)
+class Checkpoint:
+    path: Path
+    label: str
+    created_at: datetime
+    title: str
+    chapter_count: int
+    asset_count: int
 
 
 def _default_directory() -> Path:
@@ -152,6 +169,63 @@ class Workspace:
         with probe:
             target.unlink(missing_ok=True)
         return True
+
+    def _checkpoint_directory(self, book: Book) -> Path:
+        digest = sha256(book.identifier.encode('utf-8')).hexdigest()
+        directory = self.directory / 'checkpoints' / digest
+        if directory.resolve() != directory:
+            raise ValueError('检查点目录必须位于工作区内')
+        return directory
+
+    def save_checkpoint(self, book: Book, label: str) -> Checkpoint:
+        """Publish a complete project and its checkpoint information together."""
+        directory = self._checkpoint_directory(book)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f'checkpoint-{uuid4().hex}.bookproj'
+        checkpoint = Checkpoint(
+            path, label.strip() or '手动检查点', datetime.now(timezone.utc),
+            book.title, len(book.chapters), len(book.assets),
+        )
+        metadata = {
+            'label': checkpoint.label,
+            'created_at': checkpoint.created_at.isoformat(),
+            'title': checkpoint.title,
+            'chapter_count': checkpoint.chapter_count,
+            'asset_count': checkpoint.asset_count,
+        }
+        with publish_file(path, overwrite=False) as temporary:
+            book.save(temporary)
+            with ZipFile(temporary, 'a', ZIP_DEFLATED) as archive:
+                archive.writestr(_CHECKPOINT_METADATA, json.dumps(metadata, ensure_ascii=False))
+        return checkpoint
+
+    def checkpoints(self, book: Book) -> list[Checkpoint]:
+        """List this book's available checkpoints, newest first."""
+        checkpoints = []
+        for path in self._checkpoint_directory(book).glob('checkpoint-*.bookproj'):
+            if path.is_symlink() or not _CHECKPOINT_NAME.fullmatch(path.name):
+                continue
+            try:
+                with ZipFile(path) as archive:
+                    metadata = json.loads(archive.read(_CHECKPOINT_METADATA))
+                created_at = datetime.fromisoformat(metadata['created_at']).astimezone(timezone.utc)
+                checkpoints.append(Checkpoint(
+                    path, metadata['label'], created_at, metadata['title'],
+                    metadata['chapter_count'], metadata['asset_count'],
+                ))
+            except (BadZipFile, FileNotFoundError, KeyError, TypeError, ValueError):
+                continue
+        return sorted(checkpoints, key=lambda item: (item.created_at, item.path.name), reverse=True)
+
+    def load_checkpoint(self, book: Book, checkpoint: Checkpoint) -> Book:
+        path = checkpoint.path
+        if (path.is_symlink() or path.resolve().parent != self._checkpoint_directory(book)
+                or not _CHECKPOINT_NAME.fullmatch(path.name)):
+            raise ValueError('此检查点不在当前书稿的工作区内')
+        restored = Book.load(path)
+        if restored.identifier != book.identifier:
+            raise ValueError('此检查点属于其他书稿')
+        return restored
 
     def close(self) -> None:
         """Release ownership, leaving any saved snapshot available to recover."""

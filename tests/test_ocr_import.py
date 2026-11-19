@@ -1,3 +1,4 @@
+from hashlib import sha256
 from io import BytesIO
 import json
 from pathlib import Path
@@ -28,6 +29,11 @@ class OcrImportTests(unittest.TestCase):
             self.assertEqual(book.title, "扫描页")
             self.assertEqual([page.title for page in book.chapters], ["第 1 页", "第 3 页"])
             self.assertIn("<h1>第三页</h1>", book.chapters[1].html)
+            digest = sha256(pdf.read_bytes()).hexdigest()
+            self.assertEqual([chapter.scan for chapter in book.chapters], [
+                {"path": str(pdf.resolve()), "sha256": digest, "page": number, "engine": "xiaomi"}
+                for number in (1, 3)
+            ])
             self.assertEqual(progress[-1][:2], (2, 2))
             for call in recognize.call_args_list:
                 raster = Image.open(BytesIO(call.args[0]))
