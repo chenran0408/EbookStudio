@@ -13,22 +13,23 @@
 <main id="workspace">
   <section id="editor-pane" class="pane" aria-label="正文编辑" hidden>
     <h2 class="pane-title editor-title">正文编辑</h2>
-    <div id="toolbar" role="group" aria-label="正文排版" hidden>
+    <div id="toolbar" class="editor-toolbar" role="toolbar" aria-label="正文排版" hidden>
       <div class="tool-group" role="group" aria-label="段落样式">
         <button type="button" data-command="paragraph" aria-pressed="false">正文</button>
-        <button type="button" data-command="h2" aria-pressed="false" title="二级标题">标题</button>
-        <button type="button" data-command="h3" aria-pressed="false" title="三级标题">小标题</button>
+        <button type="button" data-command="h2" aria-pressed="false" title="二级标题">标题 2</button>
+        <button type="button" data-command="h3" aria-pressed="false" title="三级标题">标题 3</button>
       </div>
       <div class="tool-group" role="group" aria-label="文字样式">
-        <button type="button" data-command="bold" aria-pressed="false">加粗</button>
-        <button type="button" data-command="italic" aria-pressed="false">斜体</button>
+        <button type="button" data-command="bold" aria-pressed="false" aria-keyshortcuts="Control+B" title="加粗（Ctrl+B）">加粗</button>
+        <button type="button" data-command="italic" aria-pressed="false" aria-keyshortcuts="Control+I" title="斜体（Ctrl+I）">斜体</button>
         <button type="button" data-command="sup" aria-pressed="false">上标</button>
         <button type="button" data-command="sub" aria-pressed="false">下标</button>
       </div>
-      <div class="tool-group" role="group" aria-label="列表、引用与表格">
+      <div class="tool-group" role="group" aria-label="列表、引用与插入">
         <button type="button" data-command="bullet" aria-label="项目列表" aria-pressed="false">列表</button>
         <button type="button" data-command="ordered" aria-label="编号列表" aria-pressed="false">编号</button>
         <button type="button" data-command="quote" aria-pressed="false">引用</button>
+        <button type="button" data-command="link" aria-haspopup="dialog" aria-pressed="false" aria-keyshortcuts="Control+K" title="插入或编辑链接（Ctrl+K）">链接</button>
         <button type="button" data-command="table" aria-label="插入表格">表格</button>
       </div>
       <div class="tool-group" role="group" aria-label="编辑历史">
@@ -36,9 +37,22 @@
         <button type="button" data-command="redo" disabled>重做</button>
       </div>
     </div>
+    <div id="table-tools" class="editor-toolbar" role="toolbar" aria-label="当前表格操作" hidden>
+      <span class="context-label" aria-hidden="true">表格操作</span>
+      <div class="tool-group" role="group" aria-label="行与列">
+        <button type="button" data-command="add-row" title="在当前行下方插入">插入行</button>
+        <button type="button" data-command="add-column" title="在当前列右侧插入">插入列</button>
+        <button type="button" data-command="delete-row">删除行</button>
+        <button type="button" data-command="delete-column">删除列</button>
+      </div>
+      <div class="tool-group" role="group" aria-label="单元格">
+        <button type="button" data-command="merge-cells" aria-label="合并单元格">合并</button>
+        <button type="button" data-command="split-cell" aria-label="拆分单元格">拆分</button>
+      </div>
+    </div>
     <div id="editor"></div>
   </section>
-  <section id="preview-pane" class="pane" aria-labelledby="preview-title" hidden>
+  <section id="preview-pane" class="pane" aria-labelledby="preview-title" tabindex="-1" hidden>
     <div class="pane-header">
       <h2 id="preview-title" class="pane-title">阅读预览</h2>
       <span id="preview-size"></span>
@@ -52,5 +66,21 @@
     </div>
   </section>
 </main>
+<dialog id="link-dialog" aria-labelledby="link-title">
+  <form id="link-form">
+    <h2 id="link-title">插入链接</h2>
+    <label for="link-target">链接地址</label>
+    <input id="link-target" name="href" type="text" inputmode="url" autocomplete="off" spellcheck="false"
+           aria-describedby="link-help link-error" required autofocus>
+    <p id="link-help">可用网址、mailto: 邮件链接和书内相对路径。</p>
+    <p id="link-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button id="remove-link" type="button" hidden>移除链接</button>
+      <span class="dialog-spacer"></span>
+      <button id="cancel-link" type="button">取消</button>
+      <button type="submit" class="primary">应用</button>
+    </div>
+  </form>
+</dialog>
 </body>
 </html>

@@ -22,10 +22,13 @@ from PySide6.QtWidgets import (
     QApplication, QBoxLayout, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSplitter, QStackedWidget, QTabBar, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTabBar, QTabWidget,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from book_info import BookInfoDialog
+from book_quality_dialog import show_book_quality
+from book_search import select_search_result
 from ebook_core import Asset, Book, Chapter, asset_href, resolve_href
 import capture
 import conversion
@@ -339,6 +342,30 @@ class CaptureDialog(QDialog):
             super().reject()
 
 
+class BookTitleLabel(QLabel):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.full_text = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+
+    def set_title(self, text):
+        if text != self.full_text:
+            self.full_text = text
+            self.setAccessibleName(text)
+            self.setToolTip(text)
+            self.fit_title()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_title()
+
+    def fit_title(self):
+        self.setText(self.fontMetrics().elidedText(
+            self.full_text, Qt.TextElideMode.ElideRight, self.contentsRect().width(),
+        ))
+
+
 class Studio(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -347,6 +374,7 @@ class Studio(QMainWindow):
         self.dirty = False
         self.active = -1
         self.token = ""
+        self.source_document = None
         self.task = None
         self.web_ready = False
         self.workspace = Workspace()
@@ -375,26 +403,33 @@ class Studio(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         header = QWidget(objectName="header")
+        header.setMinimumHeight(62)
         bar = QHBoxLayout(header)
-        bar.setContentsMargins(18, 10, 18, 10)
-        bar.setSpacing(12)
-        bar.addWidget(QLabel("电子书工作台", objectName="brand"))
+        bar.setContentsMargins(20, 9, 18, 9)
+        bar.setSpacing(18)
+        identity = QVBoxLayout()
+        identity.setSpacing(1)
+        self.workspace_title = BookTitleLabel(objectName="brand")
+        identity.addWidget(self.workspace_title)
         self.project_state = QLabel(objectName="projectState")
-        bar.addWidget(self.project_state)
-        bar.addStretch()
+        identity.addWidget(self.project_state)
+        bar.addLayout(identity, 1)
         self.project_actions = QWidget()
         actions = QHBoxLayout(self.project_actions)
         actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(7)
         self.import_button = QPushButton("导入内容")
         source_menu = QMenu(self.import_button)
-        source_menu.addAction("章节文件…", self.import_files)
-        source_menu.addAction("网页采集…", self.capture_urls)
-        source_menu.addAction("扫描件 OCR…", self.import_scan)
+        source_menu.addAction("从文件追加章节…", self.import_files)
+        source_menu.addAction("从网页追加章节…", self.capture_urls)
         self.import_button.setMenu(source_menu)
         actions.addWidget(self.import_button)
         self.save_button = QPushButton("保存工程")
         self.save_button.clicked.connect(self.save)
         actions.addWidget(self.save_button)
+        self.quality_button = QPushButton("检查书稿")
+        self.quality_button.clicked.connect(self.check_book_quality)
+        actions.addWidget(self.quality_button)
         self.export_button = QPushButton("导出", objectName="primary")
         self.export_button.clicked.connect(self.export)
         actions.addWidget(self.export_button)
@@ -418,7 +453,7 @@ class Studio(QMainWindow):
         self.nav_book.clicked.connect(self.show_book)
         nav.addWidget(self.nav_book)
         nav.addStretch()
-        tools = QPushButton("工具")
+        tools = QPushButton("本机工具")
         tools.setToolTip("检查本机 OCR 模型和转换工具")
         tools.clicked.connect(self.show_tools)
         nav.addWidget(tools)
@@ -427,14 +462,14 @@ class Studio(QMainWindow):
         body.addWidget(self.screens, 1)
         self.welcome = self.build_welcome()
         self.screens.addWidget(self.welcome)
-        split = QSplitter()
+        split = QSplitter(objectName="workspaceSplit")
         split.setChildrenCollapsible(False)
         self.screens.addWidget(split)
         self.split = split
         sidebar = QWidget(objectName="sidebar")
         side = QVBoxLayout(sidebar)
-        side.setContentsMargins(12, 14, 12, 14)
-        side.setSpacing(9)
+        side.setContentsMargins(14, 16, 14, 14)
+        side.setSpacing(10)
         overview = QHBoxLayout()
         self.chapter_count = QLabel("章节目录", objectName="section")
         overview.addWidget(self.chapter_count, 1)
@@ -452,11 +487,18 @@ class Studio(QMainWindow):
         clear_filter = QShortcut(QKeySequence("Esc"), self.chapter_filter)
         clear_filter.setContext(Qt.ShortcutContext.WidgetShortcut)
         clear_filter.activated.connect(self.clear_chapter_filter)
-        side.addWidget(self.chapter_filter)
+        search = QHBoxLayout()
+        search.setSpacing(6)
+        search.addWidget(self.chapter_filter, 1)
+        search_text = QPushButton("搜索正文")
+        search_text.setToolTip("在整本书稿中搜索正文（Ctrl+Shift+F）")
+        search_text.clicked.connect(self.search_book_text)
+        search.addWidget(search_text)
+        side.addLayout(search)
         self.no_matches = QLabel("没有匹配的章节", objectName="muted")
         self.no_matches.hide()
         side.addWidget(self.no_matches)
-        self.chapters = QTreeWidget()
+        self.chapters = QTreeWidget(objectName="chapterTree")
         self.chapters.setAccessibleName("章节目录")
         self.chapters.setHeaderHidden(True)
         self.chapters.setColumnCount(1)
@@ -469,6 +511,7 @@ class Studio(QMainWindow):
         self.chapters.itemExpanded.connect(lambda item: self.collapsed_paths.discard(item.data(0, path_role)))
         side.addWidget(self.chapters, 1)
         operations = QHBoxLayout()
+        operations.setSpacing(5)
         self.chapter_operations = {}
         for label, callback in (
             ("新增", self.add_chapter), ("上移", lambda: self.move(-1)), ("下移", lambda: self.move(1)),
@@ -484,8 +527,8 @@ class Studio(QMainWindow):
 
         writing = QWidget(objectName="writing")
         main = QVBoxLayout(writing)
-        main.setContentsMargins(14, 14, 14, 12)
-        main.setSpacing(9)
+        main.setContentsMargins(16, 16, 16, 14)
+        main.setSpacing(10)
         chapter_form = QHBoxLayout()
         label = QLabel("章节标题")
         self.chapter_title = QLineEdit(objectName="chapterTitle")
@@ -507,7 +550,7 @@ class Studio(QMainWindow):
         self.mode.currentChanged.connect(self.mode_changed)
         row.addWidget(self.mode)
         row.addStretch()
-        self.split_preview = QPushButton("并排预览", checkable=True)
+        self.split_preview = QPushButton("实时预览", checkable=True)
         self.split_preview.toggled.connect(self.open_view)
         row.addWidget(self.split_preview)
         self.device = QComboBox()
@@ -523,10 +566,10 @@ class Studio(QMainWindow):
 
         self.views = QStackedWidget()
         main.addWidget(self.views, 1)
-        empty = QWidget()
+        empty = QWidget(objectName="emptyEditor")
         empty_layout = QVBoxLayout(empty)
         empty_layout.addStretch()
-        empty_label = QLabel("书稿还没有章节")
+        empty_label = QLabel("书稿还没有章节", objectName="section")
         empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(empty_label)
         add_first = QPushButton("添加章节")
@@ -576,6 +619,8 @@ class Studio(QMainWindow):
         view_menu.addAction("开始页", self.show_start)
         jump = view_menu.addAction("搜索章节标题", self.focus_chapter_filter)
         jump.setShortcut(QKeySequence("Ctrl+P"))
+        self.search_text_action = view_menu.addAction("搜索正文", self.search_book_text)
+        self.search_text_action.setShortcut(QKeySequence("Ctrl+Shift+F"))
         convert_menu = self.menuBar().addMenu("出书")
         convert_menu.addAction("导入章节文件", self.import_files)
         convert_menu.addAction("识别扫描 PDF 或图片", self.import_scan)
@@ -608,12 +653,12 @@ class Studio(QMainWindow):
         page = QWidget(objectName="welcome")
         scroll.setWidget(page)
         outer = QVBoxLayout(page)
-        outer.setContentsMargins(26, 38, 26, 28)
+        self.start_outer = outer
         content = QWidget()
         content.setMaximumWidth(1030)
         blocks = QVBoxLayout(content)
         blocks.setContentsMargins(0, 0, 0, 0)
-        blocks.setSpacing(18)
+        blocks.setSpacing(15)
         centered = QHBoxLayout()
         centered.addStretch(1)
         centered.addWidget(content, 18)
@@ -622,9 +667,25 @@ class Studio(QMainWindow):
         outer.addStretch()
 
         blocks.addWidget(QLabel("开始制作电子书", objectName="startTitle"))
+        self.current_book_strip = QWidget(objectName="currentBook")
+        current = QHBoxLayout(self.current_book_strip)
+        current.setContentsMargins(14, 9, 14, 9)
+        current.setSpacing(12)
+        summary = QVBoxLayout()
+        summary.setSpacing(2)
+        self.start_project_title = BookTitleLabel(objectName="currentBookTitle")
+        summary.addWidget(self.start_project_title)
+        self.start_project_state = QLabel(objectName="muted")
+        summary.addWidget(self.start_project_state)
+        current.addLayout(summary, 1)
+        continue_book = QPushButton("继续编辑")
+        continue_book.clicked.connect(self.show_book)
+        current.addWidget(continue_book)
+        blocks.addWidget(self.current_book_strip)
+
         self.draft_notice = QWidget(objectName="draftNotice")
         notice = QHBoxLayout(self.draft_notice)
-        notice.setContentsMargins(12, 8, 12, 8)
+        notice.setContentsMargins(14, 9, 14, 9)
         self.draft_label = QLabel()
         self.draft_label.setWordWrap(True)
         notice.addWidget(self.draft_label, 1)
@@ -638,29 +699,35 @@ class Studio(QMainWindow):
         actions = QWidget()
         action_layout = QVBoxLayout(actions)
         action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.addWidget(QLabel("新建与导入", objectName="section"))
+        action_layout.setSpacing(10)
+        action_layout.addWidget(QLabel("创建与打开", objectName="section"))
         grid = QGridLayout()
         grid.setSpacing(12)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         for index, (name, detail, callback) in enumerate((
-            ("新建书稿", "从第一章开始写作", self.new),
-            ("打开书籍或工程", "继续编辑 EPUB、电子书工程或文稿", self.open),
-            ("网页采集", "把文章或网站目录整理成章节", self.capture_urls),
-            ("扫描件 OCR", "把 PDF 扫描件或照片转为可编辑正文", self.import_scan),
+            ("新建书稿", "从空白章节开始写作", self.new),
+            ("打开书籍或工程", "继续编辑 EPUB、工程或文稿", self.open),
+            ("网页采集", "把文章或网站目录整理成书稿", self.capture_urls),
+            ("扫描件 OCR", "把 PDF 扫描件或照片转成书稿", self.import_scan),
         )):
-            card = QWidget(objectName="startCard")
+            card = QPushButton(objectName="startPrimaryCard" if index == 0 else "startCard")
+            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            card.setMinimumHeight(86)
+            card.setAccessibleName(name)
+            card.setAccessibleDescription(detail)
+            card.clicked.connect(callback)
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(12, 10, 12, 13)
-            card_layout.setSpacing(5)
-            button = QPushButton(name, objectName="primary" if index == 0 else "")
-            button.setMinimumHeight(39)
-            button.clicked.connect(callback)
-            card_layout.addWidget(button)
-            label = QLabel(detail, objectName="muted")
-            label.setWordWrap(True)
-            label.setContentsMargins(4, 0, 4, 0)
-            card_layout.addWidget(label)
+            card_layout.setContentsMargins(15, 12, 15, 12)
+            card_layout.setSpacing(4)
+            card_layout.addStretch()
+            title = QLabel(name, objectName="cardTitle")
+            caption = QLabel(detail, objectName="cardDetail")
+            caption.setWordWrap(True)
+            for label in (title, caption):
+                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                card_layout.addWidget(label)
+            card_layout.addStretch()
             grid.addWidget(card, index // 2, index % 2)
         action_layout.addLayout(grid)
         extras = QHBoxLayout()
@@ -677,12 +744,11 @@ class Studio(QMainWindow):
         recent.setContentsMargins(14, 12, 14, 14)
         recent.setSpacing(10)
         recent.addWidget(QLabel("最近打开", objectName="section"))
-        self.recent_empty = QLabel("暂无最近记录", objectName="muted")
+        self.recent_empty = QLabel("打开或保存的书稿会显示在这里。", objectName="muted")
+        self.recent_empty.setWordWrap(True)
         recent.addWidget(self.recent_empty)
-        self.recent_list = QListWidget()
+        self.recent_list = QListWidget(objectName="recentList")
         self.recent_list.setAccessibleName("最近打开的书籍与工程")
-        self.recent_list.setMinimumHeight(86)
-        self.recent_list.setMaximumHeight(200)
         self.recent_list.itemActivated.connect(
             lambda item: self.open_path(Path(item.data(Qt.ItemDataRole.UserRole)))
         )
@@ -699,9 +765,12 @@ class Studio(QMainWindow):
             self.resize_start_page()
 
     def resize_start_page(self):
-        direction = QBoxLayout.Direction.LeftToRight if self.width() >= 1050 else QBoxLayout.Direction.TopToBottom
+        compact = self.width() < 1050
+        direction = QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight
         if self.start_columns.direction() != direction:
             self.start_columns.setDirection(direction)
+        margins = (24, 20, 24, 8) if compact else (28, 32, 28, 24)
+        self.start_outer.setContentsMargins(*margins)
 
     def refresh_welcome(self):
         recent = self.workspace.recent()
@@ -710,6 +779,10 @@ class Studio(QMainWindow):
             item = QListWidgetItem(path.name, self.recent_list)
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             item.setToolTip(str(path))
+        if recent:
+            visible_rows = min(self.recent_list.count(), 5)
+            row_height = self.recent_list.sizeHintForRow(0)
+            self.recent_list.setFixedHeight(visible_rows * row_height + 2 * self.recent_list.frameWidth())
         self.recent_empty.setVisible(not recent)
         self.recent_list.setVisible(bool(recent))
         count = len(self.recovery_candidates())
@@ -783,15 +856,22 @@ class Studio(QMainWindow):
             self.recovered_draft = None
 
     def update_title(self):
+        title = self.book.title or "未命名电子书"
         prefix = "* " if self.dirty else ""
-        self.setWindowTitle(f"{prefix}{self.book.title or '未命名电子书'} — 电子书工作台")
+        self.setWindowTitle(f"{prefix}{title} — 电子书工作台")
         showing_book = self.book_started and not self.showing_start
+        state = "未保存修改" if self.dirty else "已保存" if self.project else "尚未保存工程"
+        self.workspace_title.set_title(title if showing_book else "电子书工作台")
+        self.current_book_strip.setVisible(self.book_started)
+        self.start_project_title.set_title(title)
+        self.start_project_state.setText(f"当前书稿 · {state}")
         self.nav_start.setChecked(not showing_book)
         self.nav_book.setChecked(showing_book)
         self.nav_book.setEnabled(self.book_started)
         self.project_actions.setVisible(showing_book)
         self.project_state.setVisible(showing_book)
-        self.project_state.setText("未保存修改" if self.dirty else "已保存" if self.project else "新书稿")
+        self.project_state.setText(state)
+        self.search_text_action.setEnabled(self.book_started)
         self.export_button.setEnabled(bool(self.book.chapters))
         self.screens.setCurrentWidget(self.split if showing_book else self.welcome)
 
@@ -872,10 +952,36 @@ class Studio(QMainWindow):
 
     def jump_to_match(self):
         if self.chapter_matches:
-            item = self.chapter_items[self.chapter_matches[0]]
-            self.chapters.setCurrentItem(item)
-            self.chapters.scrollToItem(item)
-            self.chapters.setFocus()
+            self.go_to_chapter(self.chapter_matches[0], clear_filter=False)
+
+    def go_to_chapter(self, row, *, clear_filter=True):
+        if not 0 <= row < len(self.chapter_items):
+            return
+        self.show_book()
+        if clear_filter:
+            self.chapter_filter.clear()
+        item = self.chapter_items[row]
+        parent = item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        self.chapters.setCurrentItem(item)
+        self.chapters.scrollToItem(item)
+        self.chapters.setFocus()
+
+    def search_book_text(self):
+        if not self.book_started:
+            return
+
+        def choose():
+            row = select_search_result(self, self.book)
+            if row is not None:
+                self.go_to_chapter(row)
+
+        self.flush_current_edits(choose)
+
+    def check_book_quality(self):
+        self.flush_current_edits(lambda: show_book_quality(self))
 
     def update_chapter_operations(self):
         active = self.chapter() is not None
@@ -891,6 +997,8 @@ class Studio(QMainWindow):
         self.active = row
         self.token = secrets.token_hex(8)
         chapter = self.chapter()
+        if self.source_document is not None and (chapter is None or chapter.path != self.source_document[0]):
+            self.source_document = None
         self.chapter_title.setEnabled(chapter is not None)
         self.chapter_title.setText(chapter.title if chapter else "")
         if chapter:
@@ -975,13 +1083,20 @@ class Studio(QMainWindow):
 
     def remove(self):
         chapter = self.chapter()
-        if chapter and QMessageBox.question(self, "删除章节", f"从工程中删除「{chapter.title}」？") == QMessageBox.StandardButton.Yes:
-            for child in self.book.chapters[self.active + 1:self.branch_end(self.active)]:
-                child.level -= 1
-            self.book.chapters.pop(self.active)
-            self.collapsed_paths.discard(chapter.path)
-            self.changed()
-            self.reload(min(self.active, len(self.book.chapters) - 1))
+        if chapter is None:
+            return
+        children = self.book.chapters[self.active + 1:self.branch_end(self.active)]
+        prompt = f"从工程中删除「{self.row_label(chapter)}」？"
+        if children:
+            prompt += f"\n其下属的 {len(children)} 个章节将保留，并提升一级。"
+        if QMessageBox.question(self, "删除章节", prompt) != QMessageBox.StandardButton.Yes:
+            return
+        for child in children:
+            child.level -= 1
+        self.book.chapters.pop(self.active)
+        self.collapsed_paths.discard(chapter.path)
+        self.changed()
+        self.reload(min(self.active, len(self.book.chapters) - 1))
 
     def edit_stylesheet(self):
         files = {"新建章节样式": None}
@@ -1028,6 +1143,22 @@ class Studio(QMainWindow):
         self.web_ready = True
         self.open_view()
 
+    def flush_current_edits(self, continuation):
+        if not self.web_ready or self.view_mode() != "rich" or self.chapter() is None:
+            continuation()
+            return
+        token = self.token
+
+        def accept(payload):
+            if not isinstance(payload, str) or self.token != token:
+                return
+            current = json.loads(payload)
+            if current is not None:
+                self.editor_changed(current["token"], current["html"])
+            continuation()
+
+        self.web.page().runJavaScript("JSON.stringify(window.studioEditor?.current?.() ?? null)", accept)
+
     def open_view(self):
         chapter = self.chapter()
         self.mode.setEnabled(chapter is not None)
@@ -1046,8 +1177,11 @@ class Studio(QMainWindow):
             self.views.setCurrentIndex(0)
             return
         if mode == "source":
-            with QSignalBlocker(self.source):
-                self.source.setPlainText(chapter.html)
+            current = (chapter.path, chapter.html)
+            if current != self.source_document:
+                self.source_document = current
+                with QSignalBlocker(self.source):
+                    self.source.setPlainText(chapter.html)
             self.views.setCurrentIndex(1)
             return
         self.views.setCurrentIndex(2)
@@ -1064,6 +1198,7 @@ class Studio(QMainWindow):
         chapter = self.chapter()
         if chapter and self.view_mode() == "source":
             chapter.html = self.source.toPlainText()
+            self.source_document = (chapter.path, chapter.html)
             rich = can_edit_rich(chapter.html)
             self.mode.setTabEnabled(0, rich)
             self.show_mode_hint(rich)
@@ -1072,8 +1207,10 @@ class Studio(QMainWindow):
     def editor_changed(self, token, content):
         chapter = self.chapter()
         if token == self.token and chapter and self.view_mode() == "rich":
-            chapter.html = edit_body(chapter.html, content)
-            self.changed()
+            revised = edit_body(chapter.html, content)
+            if revised != chapter.html:
+                chapter.html = revised
+                self.changed()
 
     def add_image(self):
         chapter = self.chapter()
@@ -1183,6 +1320,7 @@ class Studio(QMainWindow):
         self.discard_draft()
         self.book = book
         self.project = project
+        self.source_document = None
         self.dirty = False
         self.book_started = True
         self.showing_start = False
