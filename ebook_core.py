@@ -104,6 +104,8 @@ class Book:
     _epub_path: str | None = field(default=None, repr=False)
     _epub_members: dict[str, bytes] = field(default_factory=dict, repr=False)
     _epub_chapters: dict[str, tuple[str, int, str]] = field(default_factory=dict, repr=False)
+    linked_stylesheets: list[str] = field(default_factory=list)
+    font_subsets: list[str] = field(default_factory=list)
 
     def save(self, path: str | Path) -> None:
         chapter_rows = []
@@ -121,6 +123,8 @@ class Book:
             'language': self.language,
             'identifier': self.identifier,
             'stylesheet': self.stylesheet,
+            'linked_stylesheets': self.linked_stylesheets,
+            'font_subsets': self.font_subsets,
             'chapters': chapter_rows,
             'chapter_context': chapter_context,
             'toc_entries': self.toc_entries,
@@ -156,6 +160,8 @@ class Book:
                 language=data['language'],
                 identifier=data['identifier'],
                 stylesheet=data.get('stylesheet', ''),
+                linked_stylesheets=data.get('linked_stylesheets', []),
+                font_subsets=data.get('font_subsets', []),
                 chapters=chapters,
                 toc_entries=data.get('toc_entries'),
                 capture_profiles=data.get('capture_profiles', []),

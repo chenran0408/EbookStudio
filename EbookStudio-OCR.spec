@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all, collect_data_files, copy_metadata
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules, copy_metadata
 
 root = Path(SPECPATH)
 datas = [(str(root / "web" / name), "web") for name in ("index.html", "editor.css", "editor.js")]
@@ -8,7 +8,8 @@ datas.extend((str(root / name), ".") for name in ("paddle_worker.py", "agent.md"
 datas += copy_metadata("trafilatura")
 datas += collect_data_files("trafilatura", includes=["settings.cfg"])
 binaries = []
-hidden = []
+# fontTools chooses table parsers dynamically when it opens an embedded font.
+hidden = collect_submodules("fontTools.ttLib.tables")
 for package in ("pypdfium2", "pypdfium2_raw"):
     package_data, package_binaries, package_imports = collect_all(package)
     datas.extend(package_data)

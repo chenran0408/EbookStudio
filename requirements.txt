@@ -7,3 +7,6 @@ pypdf>=5
 playwright>=1.50
 pypdfium2>=4.30
 markdown-it-py>=3
+tinycss2>=1.4.0
+fonttools>=4.60.1
+Brotli>=1.2.0

@@ -4,4 +4,6 @@
 
 源码运行时通过 Python 安装 Qt for Python、网页提取和 PDF 等依赖。编辑器由锁定的 npm 依赖构建。Windows 下载包在同一目录提供随附组件的版权声明、许可证和相应源码获取方式。[Python 依赖](requirements.txt) · [编辑器依赖](web/package-lock.json)
 
+CSS 检查使用 tinycss2 和 webencodings。字体处理使用 fontTools，WOFF2 解码和编码使用 Brotli。相应许可证随 Windows 下载包提供。 [tinycss2](https://github.com/Kozea/tinycss2) · [webencodings](https://github.com/gsnedders/python-webencodings) · [fontTools](https://github.com/fonttools/fonttools) · [Brotli](https://github.com/google/brotli)
+
 抓取和导入的作品版权归其权利人，软件依赖的许可证适用于对应的软件组件。

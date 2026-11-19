@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 class ProjectShelf(QWidget):
     open_requested = Signal(object)
     pin_failed = Signal(str)
+    library_requested = Signal()
 
     def __init__(self, workspace):
         super().__init__(objectName="recentPanel")
@@ -25,6 +26,11 @@ class ProjectShelf(QWidget):
         layout.setSpacing(10)
         heading = QHBoxLayout()
         heading.addWidget(QLabel("我的书稿", objectName="section"), 1)
+        self.library_button = QPushButton("书库")
+        self.library_button.setAccessibleName("打开书库")
+        self.library_button.setToolTip("按作者和标签管理本机书籍")
+        self.library_button.clicked.connect(self.library_requested)
+        heading.addWidget(self.library_button)
         self.pinned_only = QPushButton("只看置顶", checkable=True)
         heading.addWidget(self.pinned_only)
         layout.addLayout(heading)

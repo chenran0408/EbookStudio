@@ -348,7 +348,7 @@ function showPreview(html: string) {
   doc.documentElement.dataset.previewRevision = String(++previewRevision);
   const meta = doc.createElement("meta");
   meta.httpEquiv = "Content-Security-Policy";
-  meta.content = "default-src 'none'; img-src data:; style-src 'unsafe-inline'";
+  meta.content = "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'";
   doc.head.prepend(meta);
   const css = doc.createElement("style");
   css.textContent = "body{box-sizing:border-box;max-width:" + previewWidth +

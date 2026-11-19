@@ -349,18 +349,18 @@ def ocr_book(
             try:
                 if progress:
                     progress(offset, len(selected), f"正在识别第 {page} 页")
-                png = _prepared_png(read_image(page))
-                if png is None:
-                    body = "<p>（空白页）</p>"
-                else:
-                    body = _render_markdown(_recognize(png, endpoint, model, max_tokens))
-                book.chapters.append(Chapter(
-                    title=f"第 {page} 页", html=body,
-                    scan=scan_provenance(source, digest, page, "xiaomi"),
-                ))
+                chapter = xiaomi_chapter(read_image(page), endpoint, model, max_tokens, page)
+                chapter.scan = scan_provenance(source, digest, page, "xiaomi")
+                book.chapters.append(chapter)
             except (OSError, RuntimeError, ValueError) as exc:
                 raise OcrError(f"{source.name} 第 {page} 页：{exc}") from exc
             if progress:
                 progress(offset + 1, len(selected), f"第 {page} 页已完成")
     return book
+
+
+def xiaomi_chapter(image, endpoint, model, max_tokens, page):
+    png = _prepared_png(image)
+    body = "<p>（空白页）</p>" if png is None else _render_markdown(_recognize(png, endpoint, model, max_tokens))
+    return Chapter(title=f"第 {page} 页", html=body)
 

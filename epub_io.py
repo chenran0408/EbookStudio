@@ -171,6 +171,33 @@ def _rename_navigation(path: str, data: bytes, titles: dict[str, tuple[str, str]
     return _bytes(doc.getroottree()) if len(pending) != len(titles) else data
 
 
+def _read_package(archive: ZipFile) -> tuple[str, bytes, etree._Element]:
+    container = _xml(archive.read('META-INF/container.xml'))
+    rootfile = container.find(f'.//{{{CONTAINER}}}rootfile')
+    if rootfile is None or not rootfile.get('full-path'):
+        raise ValueError('EPUB 缺少书籍包文件')
+    path = archive_path(rootfile.get('full-path'))
+    data = archive.read(path)
+    return path, data, _xml(data)
+
+
+def read_epub_metadata(path: Path) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """Read the EPUB title, creator names and subjects without loading its contents."""
+    with ZipFile(path) as archive:
+        if archive.read('mimetype') != MIMETYPE:
+            raise ValueError('文件缺少有效的 EPUB 媒体类型')
+        _, _, package = _read_package(archive)
+        metadata = package.find(f'{{{OPF}}}metadata')
+        if metadata is None:
+            raise ValueError('EPUB 缺少元数据')
+        title = (metadata.findtext(f'{{{DC}}}title') or '').strip() or path.stem
+        creators = tuple(node.text.strip() for node in metadata.findall(f'{{{DC}}}creator')
+                         if node.text and node.text.strip())
+        subjects = tuple(node.text.strip() for node in metadata.findall(f'{{{DC}}}subject')
+                         if node.text and node.text.strip())
+        return title, creators, subjects
+
+
 def open_epub(path: str | Path) -> Book:
     with ZipFile(path) as archive:
         names = [archive_path(info.filename) for info in archive.infolist() if not info.is_dir()]
@@ -185,13 +212,7 @@ def open_epub(path: str | Path) -> Book:
             for method in encryption.iter('{http://www.w3.org/2001/04/xmlenc#}EncryptionMethod'):
                 if method.get('Algorithm') not in font_algorithms:
                     raise ValueError('此 EPUB 含有受保护资源，当前支持无 DRM 的 EPUB')
-        container = _xml(archive.read('META-INF/container.xml'))
-        package_path = container.find(f'.//{{{CONTAINER}}}rootfile')
-        if package_path is None:
-            raise ValueError('EPUB 缺少书籍包文件')
-        opf_path = archive_path(package_path.attrib['full-path'])
-        package_data = archive.read(opf_path)
-        package = _xml(package_data)
+        opf_path, package_data, package = _read_package(archive)
         metadata = package.find(f'{{{OPF}}}metadata')
         spine = package.find(f'{{{OPF}}}spine')
         if metadata is None or spine is None:
@@ -313,12 +334,22 @@ def remember_chapter_document(book: Book, chapter: Chapter, doc: etree._Element)
     book._epub_chapters[chapter.path] = (chapter.title, chapter.level, _digest(chapter.html))
 
 
+def link_book_stylesheets(book: Book, chapter_path: str, head):
+    existing = {link.get('href') for link in head.findall(f'{{{XHTML}}}link') if link.get('rel') == 'stylesheet'}
+    for path in book.linked_stylesheets:
+        if path in book.assets:
+            href = asset_href(path, chapter_path)
+            if href not in existing:
+                _put(head, f'{{{XHTML}}}link', rel='stylesheet', href=href)
+                existing.add(href)
+
+
 def _write_chapter(book: Book, chapter: Chapter, css: str) -> bytes:
     baseline = book._epub_chapters.get(chapter.path)
     if baseline:
         original = book._epub_members[chapter.path]
         body_changed = _digest(chapter.html) != baseline[2]
-        if chapter.title == baseline[0] and not body_changed:
+        if chapter.title == baseline[0] and not body_changed and not book.linked_stylesheets:
             return original
         doc = _xml(original)
         title = doc.find(f'{{{XHTML}}}head/{{{XHTML}}}title')
@@ -335,6 +366,8 @@ def _write_chapter(book: Book, chapter: Chapter, css: str) -> bytes:
             footer = _put(body, f'{{{XHTML}}}footer')
             paragraph = _put(footer, f'{{{XHTML}}}p')
             _put(paragraph, f'{{{XHTML}}}a', '原网页', href=chapter.source)
+    if book.linked_stylesheets:
+        link_book_stylesheets(book, chapter.path, doc.find(f'{{{XHTML}}}head'))
     return _bytes(doc)
 
 
@@ -772,6 +805,9 @@ def write_epub(book: Book, path: str | Path, *, mobile: bool = True) -> None:
     container = etree.Element(f'{{{CONTAINER}}}container', nsmap={None: CONTAINER}, version='1.0')
     _put(_put(container, f'{{{CONTAINER}}}rootfiles'), f'{{{CONTAINER}}}rootfile',
          **{'full-path': opf_path, 'media-type': 'application/oebps-package+xml'})
+    if book.font_subsets:
+        from book_typography import subset_assets
+        assets.update(subset_assets(book, (data for name, data in documents.items() if name != old_ncx)))
     with publish_file(path) as temporary, ZipFile(temporary, 'w', ZIP_DEFLATED) as archive:
         archive.writestr('mimetype', MIMETYPE, compress_type=ZIP_STORED)
         archive.writestr('META-INF/container.xml', _bytes(container))

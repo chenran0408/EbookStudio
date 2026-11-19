@@ -66,6 +66,9 @@ def resource_references(book: Book) -> dict[str, list[ResourceReference]]:
                 continue
     for path in (name for name in original_navigation_paths(book) if name is not None):
         map_document_references(_xml(book._epub_members[path]), visitor(path, ResourceReference(path)))
+    for path in book.linked_stylesheets:
+        if path in book.assets:
+            references[path][ResourceReference('全书样式')] = None
     if book.stylesheet:
         map_css_references(book.stylesheet, visitor('styles/book.css', ResourceReference('新建章节样式')))
     if book.cover in book.assets:

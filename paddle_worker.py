@@ -7,7 +7,6 @@ import sys
 
 
 def main(work: Path) -> None:
-    pages = json.loads((work / "pages.json").read_text(encoding="utf-8"))
     cache = Path(os.environ["EBOOK_STUDIO_PADDLE_MODELS"])
     layout = cache / "PP-DocLayoutV3"
     recognition = cache / "PaddleOCR-VL-1.6"
@@ -33,17 +32,22 @@ def main(work: Path) -> None:
         use_chart_recognition=False,
         markdown_ignore_labels=["header", "footer", "header_image", "footer_image", "number"],
     )
-    for offset, page in enumerate(pages, 1):
-        image = cv2.imdecode(np.fromfile(work / f"scan-{page}.png", dtype=np.uint8), cv2.IMREAD_COLOR)
-        result = pipeline.predict(image)[0].markdown
-        images = {}
-        for index, (source, crop) in enumerate(result["markdown_images"].items(), 1):
-            name = f"crop-{page}-{index}.png"
-            crop.save(work / name, format="PNG")
-            images[source] = name
-        data = {"markdown": result["markdown_texts"], "images": images}
-        (work / f"result-{page}.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        print(f"EBOOK_STUDIO_PAGE {offset} {page}", flush=True)
+    print("EBOOK_STUDIO_READY", flush=True)
+    for _ in sys.stdin:
+        response = {}
+        try:
+            image = cv2.imdecode(np.fromfile(work / "scan.png", dtype=np.uint8), cv2.IMREAD_COLOR)
+            result = pipeline.predict(image)[0].markdown
+            images = {}
+            for index, (source, crop) in enumerate(result["markdown_images"].items(), 1):
+                name = f"crop-{index}.png"
+                crop.save(work / name, format="PNG")
+                images[source] = name
+            data = {"markdown": result["markdown_texts"], "images": images}
+            (work / "result.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception as exc:
+            response["error"] = str(exc) or type(exc).__name__
+        print("EBOOK_STUDIO_RESULT " + json.dumps(response), flush=True)
 
 
 if __name__ == "__main__":

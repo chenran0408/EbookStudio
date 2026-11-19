@@ -5,11 +5,11 @@ import base64
 from copy import deepcopy
 from hashlib import sha256
 import json
-import os
 from pathlib import Path
 import posixpath
 import re
 import secrets
+import sqlite3
 import sys
 from urllib.parse import unquote, urlsplit
 
@@ -27,11 +27,16 @@ from PySide6.QtWidgets import (
 )
 
 from book_info import BookInfoDialog
+from book_library import BookLibrary
+from book_library_dialog import BookLibraryDialog
+from book_links import map_css_references
 from book_quality_dialog import show_book_quality
 from book_resources_dialog import show_book_resources
 from book_revision_dialogs import show_book_checkpoints, show_book_replace
 from book_search import select_search_result
 from book_structure_dialog import show_book_structure
+from book_typography import DEFAULT_STYLE_PATH, FONT_TYPES, decode_stylesheet
+from book_typography_dialog import show_typography
 from ebook_core import Asset, Book, Chapter, asset_href, resolve_href
 from epub_validation_dialog import EpubCheckDialog
 import capture
@@ -39,10 +44,10 @@ from capture_review import CaptureProfilesDialog, WebUpdateDialog
 from capture_update import CaptureProfile, apply_updates, collect_updates, profiles_for, remember_profile
 from command_palette import CommandPalette
 import conversion
-from ocr_import import DEFAULT_MODEL, IMAGE_TYPES as SCAN_IMAGE_TYPES, ocr_book
+from ocr_batch import OcrBatchStore
+from ocr_batch_dialog import OcrBatchDialog
+from ocr_import import IMAGE_TYPES as SCAN_IMAGE_TYPES
 from ocr_review import show_ocr_review
-from ocr_runtime import local_server
-from paddle_import import paddle_book
 from project_shelf import ProjectShelf
 from studio_dialogs import ExportDialog, ScanDialog
 from studio_operations import (
@@ -154,26 +159,46 @@ def edit_body(document: str, content: str) -> str:
     return etree.tostring(original.getroottree(), encoding="utf-8", xml_declaration=True).decode("utf-8")
 
 
-def book_assets(book: Book, chapter: Chapter) -> tuple[dict[str, str], str]:
-    if not chapter.html.strip():
-        return {}, book.stylesheet
-    document = html.fromstring(chapter.html or "<p></p>")
+def book_assets(book: Book, chapter: Chapter, *, preview: bool = True) -> tuple[dict[str, str], str]:
+    document = html.fromstring(chapter.html if chapter.html.strip() else "<p></p>")
     mapping = {}
     styles = []
-    if original := book._epub_members.get(chapter.path):
-        head = html.fromstring(original).find("head")
+    source = book._epub_members.get(chapter.path)
+
+    def add_style(css, base):
+        if not preview:
+            return
+
+        def embed_font(href):
+            mime = FONT_TYPES.get(posixpath.splitext(urlsplit(href).path)[1][1:].lower())
+            if mime is None:
+                return href
+            try:
+                asset = book.assets.get(resolve_href(base, href))
+            except ValueError:
+                return href
+            if asset is None or mime is None:
+                return href
+            encoded = base64.b64encode(asset.data).decode("ascii")
+            return f"data:{mime};base64,{encoded}"
+
+        styles.append(map_css_references(css, embed_font))
+
+    if source:
+        head = html.fromstring(source).find("head")
         if head is not None:
             for link in head.xpath(".//link[@href]"):
                 key = resolve_href(chapter.path, link.get("href"))
                 asset = book.assets.get(key)
                 if asset is not None and asset.media_type == "text/css":
-                    styles.append(asset.data.decode("utf-8", errors="replace"))
-            styles.extend(style.text or "" for style in head.xpath(".//style"))
+                    add_style(decode_stylesheet(asset.data), key)
+            for style in head.xpath(".//style"):
+                add_style(style.text or "", chapter.path)
     folder = posixpath.dirname(chapter.path or "")
     for element in document.xpath("//img[@src] | //link[@href] | //style"):
         value = element.get("src") if element.tag == "img" else element.get("href")
         if element.tag == "style":
-            styles.append(element.text or "")
+            add_style(element.text or "", chapter.path)
             continue
         url = urlsplit(value)
         if url.scheme or url.netloc:
@@ -184,11 +209,16 @@ def book_assets(book: Book, chapter: Chapter) -> tuple[dict[str, str], str]:
         if asset is None:
             continue
         if element.tag == "link" and asset.media_type == "text/css":
-            styles.append(asset.data.decode("utf-8", errors="replace"))
+            add_style(decode_stylesheet(asset.data), key if key in book.assets else original)
         elif element.tag == "img" and asset.media_type in IMAGE_TYPES.values():
             payload = base64.b64encode(asset.data).decode("ascii")
             mapping[value] = f"data:{asset.media_type};base64,{payload}"
-    return mapping, "\n".join([*styles, book.stylesheet] if not original else styles)
+    if not source:
+        add_style(book.stylesheet, DEFAULT_STYLE_PATH)
+    for key in book.linked_stylesheets:
+        if (asset := book.assets.get(key)) is not None:
+            add_style(decode_stylesheet(asset.data), key)
+    return mapping, "\n".join(styles)
 
 
 def add_asset(book: Book, path: Path, chapter: Chapter | None = None):
@@ -700,6 +730,8 @@ class Studio(QMainWindow):
             file_menu.addAction(action)
         self.recent_menu = file_menu.addMenu("最近打开")
         self.recent_menu.aboutToShow.connect(self.refresh_recent_menu)
+        library_action = file_menu.addAction("书库…", self.open_library)
+        library_action.setProperty("commandKeywords", "作者 标签 书架 本机书籍")
         file_menu.addAction("恢复草稿…", self.choose_recovery)
         revision_menu = self.menuBar().addMenu("校对")
         self.check_book_action = revision_menu.addAction("检查书稿…", self.check_book_quality)
@@ -718,12 +750,14 @@ class Studio(QMainWindow):
         convert_menu.addAction("导入章节文件", self.import_files)
         scan_action = convert_menu.addAction("识别扫描 PDF 或图片", self.import_scan)
         scan_action.setProperty("commandKeywords", "OCR 扫描件 照片 文字识别")
+        convert_menu.addAction("OCR 批次任务…", self.manage_ocr_batches)
         convert_menu.addAction("采集网页…", self.capture_urls)
         self.book_info_action = convert_menu.addAction("书籍资料…", self.edit_book_info)
         self.structure_action = convert_menu.addAction("目录和章节管理…", self.manage_book_structure)
         self.resources_action = convert_menu.addAction("书稿资源…", self.manage_book_resources)
         self.web_update_action = convert_menu.addAction("网页增量采集…", self.open_web_profiles)
-        convert_menu.addAction("编辑样式表", self.edit_stylesheet)
+        typography_action = convert_menu.addAction("CSS 与字体…", self.edit_stylesheet)
+        typography_action.setProperty("commandKeywords", "样式表 排版 字体子集")
         convert_menu.addAction("批量转换格式", self.batch_convert)
         self.export_action = convert_menu.addAction("导出 EPUB 或其他格式", self.export)
         self.export_action.setProperty("commandKeywords", "PDF DOCX TXT HTML")
@@ -858,6 +892,9 @@ class Studio(QMainWindow):
         batch = QPushButton("批量转换格式")
         batch.clicked.connect(self.batch_convert)
         extras.addWidget(batch)
+        ocr_batches = QPushButton("OCR 批次任务")
+        ocr_batches.clicked.connect(self.manage_ocr_batches)
+        extras.addWidget(ocr_batches)
         extras.addStretch()
         action_layout.addLayout(extras)
         action_layout.addStretch()
@@ -866,6 +903,7 @@ class Studio(QMainWindow):
         self.project_shelf = ProjectShelf(self.workspace)
         self.project_shelf.open_requested.connect(self.open_path)
         self.project_shelf.pin_failed.connect(self.error)
+        self.project_shelf.library_requested.connect(self.open_library)
         columns.addWidget(self.project_shelf, 2, Qt.AlignmentFlag.AlignTop)
         blocks.addLayout(columns)
         self.resize_start_page()
@@ -1216,22 +1254,7 @@ class Studio(QMainWindow):
         self.reload(min(self.active, len(self.book.chapters) - 1))
 
     def edit_stylesheet(self):
-        files = {"新建章节样式": None}
-        files.update({key: key for key, asset in self.book.assets.items() if asset.media_type == "text/css"})
-        name, ok = QInputDialog.getItem(self, "编辑样式表", "应用到", list(files), 0, False)
-        if not ok:
-            return
-        key = files[name]
-        existing = self.book.assets[key].data.decode("utf-8", errors="replace") if key else self.book.stylesheet
-        css, ok = QInputDialog.getMultiLineText(self, "编辑样式表", "CSS", existing)
-        if ok:
-            if key:
-                self.book.assets[key] = Asset(css.encode("utf-8"), "text/css")
-            else:
-                self.book.stylesheet = css
-            self.changed()
-            self.open_view()
-            self.reload(min(self.active, len(self.book.chapters) - 1))
+        self.flush_current_edits(lambda: show_typography(self))
 
     def edit_book_info(self):
         dialog = BookInfoDialog(self, self.book)
@@ -1304,7 +1327,7 @@ class Studio(QMainWindow):
         self.views.setCurrentIndex(2)
         if self.web_ready:
             try:
-                resources, stylesheet = book_assets(self.book, chapter)
+                resources, stylesheet = book_assets(self.book, chapter, preview=not rich or live_preview)
             except (etree.ParserError, ValueError) as exc:
                 self.statusBar().showMessage(f"预览解析失败 · {exc}")
                 return
@@ -1462,6 +1485,16 @@ class Studio(QMainWindow):
         if name:
             self.open_path(Path(name))
 
+    def open_library(self):
+        try:
+            dialog = BookLibraryDialog(self, BookLibrary(self.workspace.directory))
+        except (OSError, sqlite3.Error) as exc:
+            self.error(f"无法打开本机书库。\n{exc}")
+            return
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.chosen_path is not None:
+            self.open_path(dialog.chosen_path)
+        dialog.deleteLater()
+
     def open_path(self, path):
         if self.can_leave():
             self.start_task("正在打开书籍…", lambda: read_book(path), lambda book: self.opened(book, path))
@@ -1485,24 +1518,16 @@ class Studio(QMainWindow):
         dialog = ScanDialog(self, source_name=path.name, multiple_pages=path.suffix.lower() in {".pdf", ".tif", ".tiff"})
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        pages = dialog.pages.text().strip()
-        engine = dialog.model.currentData()
-        if not self.can_leave():
+        self.manage_ocr_batches(new=(path, dialog.pages.text().strip(), dialog.model.currentData()))
+
+    def manage_ocr_batches(self, *, new=None):
+        if self.task is not None:
             return
-
-        def recognize(progress):
-            if engine == "paddle":
-                return paddle_book(path, pages=pages, progress=progress)
-            model = os.environ.get("EBOOK_STUDIO_OCR_MODEL", DEFAULT_MODEL)
-            with local_server() as (address, _):
-                return ocr_book(path, pages=pages, progress=progress, base_url=address, model=model)
-
-        def recognized(book):
-            self.opened(book, path, remember_source=False)
+        dialog = OcrBatchDialog(self, OcrBatchStore(self.workspace.directory), new=new)
+        if dialog.exec() == QDialog.DialogCode.Accepted and self.can_leave():
+            self.replace_book(dialog.book, None)
             self.changed()
-            self.statusBar().showMessage(f"已识别 {len(book.chapters)} 页，可校对正文并保存工程。")
-
-        self.start_task("正在启动本机 OCR…", recognize, recognized, reports_progress=True)
+            self.statusBar().showMessage(f"已打开 {len(dialog.book.chapters)} 页，可校对正文并保存工程。")
 
     def import_files(self):
         names, _ = QFileDialog.getOpenFileNames(self, "选择章稿文件", "", FILE_FILTER)
