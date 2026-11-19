@@ -43,7 +43,7 @@ class PaddleSessionError(OcrError):
 
 
 def _stop_worker(process):
-    # On Windows a venv launcher can have a second Python process holding the log.
+    # On Windows the venv launcher may start a separate Python worker process.
     # Let the worker exit on EOF before resorting to terminating that process tree.
     try:
         process.stdin.close()
@@ -62,6 +62,36 @@ def _stop_worker(process):
         process.wait(timeout=5)
 
 
+def _pipe_reader(output):
+    """Return available bytes, None while empty, or b'' after the pipe closes."""
+    fd = output.fileno()
+    if os.name == "nt":
+        import msvcrt
+
+        handle = ctypes.c_void_p(msvcrt.get_osfhandle(fd))
+        peek = ctypes.WinDLL("kernel32", use_last_error=True).PeekNamedPipe
+
+        def read():
+            available = ctypes.c_ulong()
+            if not peek(handle, None, 0, None, ctypes.byref(available), None):
+                error = ctypes.get_last_error()
+                if error in {109, 232}:  # ERROR_BROKEN_PIPE, ERROR_NO_DATA
+                    return b""
+                raise ctypes.WinError(error)
+            if available.value:
+                return os.read(fd, min(available.value, 8192))
+            return None
+    else:
+        os.set_blocking(fd, False)
+
+        def read():
+            try:
+                return os.read(fd, 8192)
+            except BlockingIOError:
+                return None
+    return read
+
+
 @contextmanager
 def paddle_session():
     """Keep one model loaded while the caller sends and commits pages one at a time."""
@@ -78,35 +108,39 @@ def paddle_session():
     worker = Path(__file__).with_name("paddle_worker.py")
     with TemporaryDirectory(prefix="ebook-studio-paddle-") as directory:
         work = Path(directory)
-        transcript = work / "worker.log"
         tail = deque(maxlen=12)
-        with transcript.open("wb") as output, _external_dll_search():
+        with _external_dll_search():
             process = subprocess.Popen(
                 [str(python), "-I", "-X", "utf8", "-u", str(worker), str(work)], env=env,
-                stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 encoding="utf-8", errors="replace",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
 
-        with transcript.open("rb") as output:
+        with process.stdout as output:
+            read_output = _pipe_reader(output)
+            buffer = b""
+
             def receive(marker, timeout, activity):
+                nonlocal buffer
                 deadline = monotonic() + timeout
-                buffer = b""
                 while monotonic() < deadline:
-                    chunk = output.readline()
-                    if not chunk:
-                        if process.poll() is not None:
-                            raise PaddleSessionError("PaddleOCR-VL-1.6 识别进程已退出。\n" + "".join(tail).strip())
+                    while b"\n" in buffer:
+                        line, buffer = buffer.split(b"\n", 1)
+                        text = line.decode("utf-8", errors="replace").rstrip("\r")
+                        message = text.rsplit("\r", 1)[-1]
+                        if message.startswith(marker):
+                            return message[len(marker):].strip()
+                        tail.append(text)
+                    chunk = read_output()
+                    if chunk == b"" or (chunk is None and process.poll() is not None):
+                        detail = "\n".join([*tail, buffer.decode("utf-8", errors="replace")]).strip()
+                        raise PaddleSessionError("PaddleOCR-VL-1.6 识别进程已退出。\n" + detail)
+                    if chunk is None:
                         sleep(0.05)
-                        continue
-                    buffer += chunk
-                    if not buffer.endswith(b"\n"):
-                        continue
-                    line, buffer = buffer.decode("utf-8", errors="replace"), b""
-                    if line.startswith(marker):
-                        return line[len(marker):].strip()
-                    tail.append(line)
-                raise PaddleSessionError(f"PaddleOCR-VL-1.6 {activity}超时。\n" + "".join(tail).strip())
+                    else:
+                        buffer += chunk
+                raise PaddleSessionError(f"PaddleOCR-VL-1.6 {activity}超时。\n" + "\n".join(tail).strip())
 
             def recognize(image, page):
                 scan_rgb(image).save(work / "scan.png")
