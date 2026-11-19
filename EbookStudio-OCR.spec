@@ -45,9 +45,11 @@ def bundled(entry):
         return False
     if name.startswith("Qt6") and name.endswith(".dll"):
         return name in editor_qt_libraries
-    # Windows 10 and later provide UCRT, API sets, and ICU.
+    # Use Windows system libraries and the separately installed VC++ runtime.
     system_name = name.lower()
     if system_name == "ucrtbase.dll" or system_name.startswith("api-ms-win-"):
+        return False
+    if system_name.endswith(".dll") and system_name.startswith(("msvcp140", "vcruntime140")):
         return False
     return not (system_name.startswith("icu") and "poppler" in source.lower())
 

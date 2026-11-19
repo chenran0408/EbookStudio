@@ -4,9 +4,11 @@
 
 ## 下载和启动
 
-1. 从 GitHub 发布页下载 v0.1.0 的 Windows x64 ZIP，并把整个压缩包解压到一个文件夹。 [GitHub 发布页](https://github.com/chenran0408/EbookStudio/releases)
+1. 从 GitHub 发布页下载 Windows x64 ZIP，并把整个压缩包解压到一个文件夹。适用于 Windows 10 或 11。 [GitHub 发布页](https://github.com/chenran0408/EbookStudio/releases)
 2. 双击 `EbookStudio-OCR.exe`。`EbookStudio-Agent.exe` 是可选的命令行与 MCP 入口。两个程序共用同目录里的 `_internal` 文件夹。
 3. 新建书稿，写好正文后保存为 `.bookproj`，再导出 EPUB 3。写书、编辑可重排 EPUB、采集普通网页和导出 EPUB 3 可以直接使用。格式转换、EPUBCheck、需要浏览器渲染的网页以及本地 OCR 按需配置。ZIP 中未包含 OCR 模型。
+
+首次启动时，如果系统提示缺少 `VCRUNTIME140.dll` 或 `MSVCP140.dll`，请安装 Microsoft Visual C++ v14 x64 运行库后再打开工作台。 [微软官方下载](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)
 
 ## 使用
 
