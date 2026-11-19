@@ -2,13 +2,14 @@
 
 from zipfile import BadZipFile
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout,
 )
 
-from book_replace import preview_replacement, replace_with_checkpoint
+from book_replace import PREVIEW_LIMIT, preview_replacement, replace_with_checkpoint
 from ebook_core import Book
 from replacement_rules import Rule, SavedRules
 
@@ -47,6 +48,9 @@ class BookReplaceDialog(QDialog):
         self.rules = SavedRules(workspace.directory)
         self.plan = None
         self.review_index = 0
+        self.excluded = set()
+        self.chapter_ranges = {}
+        self.offset = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 16)
@@ -89,16 +93,31 @@ class BookReplaceDialog(QDialog):
 
         self.status = _status("输入查找文字并预览变更。")
         layout.addWidget(self.status)
-        self.results = QListWidget()
+        bar = QHBoxLayout()
+        self.select_all = QPushButton("全选命中")
+        self.select_none = QPushButton("全不选")
+        self.previous = QPushButton("上一页")
+        self.next = QPushButton("下一页")
+        for button in (self.select_all, self.select_none, self.previous, self.next):
+            button.setAutoDefault(False)
+            button.setEnabled(False)
+        bar.addWidget(self.select_all)
+        bar.addWidget(self.select_none)
+        bar.addStretch()
+        bar.addWidget(self.previous)
+        bar.addWidget(self.next)
+        layout.addLayout(bar)
+        self.results = QTreeWidget()
         self.results.setAccessibleName("替换前后预览")
+        self.results.setHeaderHidden(True)
         self.results.setWordWrap(True)
         self.results.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(self.results, 1)
-        layout.addWidget(_status("应用替换前会为当前书稿创建检查点。"))
+        layout.addWidget(_status("勾选章节可选中该章所有命中，也可逐条勾选。应用前会创建检查点。"))
 
         buttons = _close_buttons(self)
-        self.apply_button = buttons.addButton("应用替换", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.apply_button = buttons.addButton("应用已选 0 处", QDialogButtonBox.ButtonRole.AcceptRole)
         self.apply_button.setObjectName("primary")
         self.apply_button.setAutoDefault(False)
         self.apply_button.setEnabled(False)
@@ -110,6 +129,11 @@ class BookReplaceDialog(QDialog):
         self.regular.toggled.connect(self.invalidate)
         self.case_sensitive.toggled.connect(self.invalidate)
         self.preview.clicked.connect(self.preview_changes)
+        self.results.itemChanged.connect(self.toggle_hit)
+        self.select_all.clicked.connect(lambda: self.select_everything(True))
+        self.select_none.clicked.connect(lambda: self.select_everything(False))
+        self.previous.clicked.connect(lambda: self.show_page(self.offset - PREVIEW_LIMIT))
+        self.next.clicked.connect(lambda: self.show_page(self.offset + PREVIEW_LIMIT))
         self.rule_list.activated.connect(self.load_rule)
         self.save_rule.clicked.connect(self.save_current_rule)
         self.delete_rule.clicked.connect(self.remove_current_rule)
@@ -192,8 +216,12 @@ class BookReplaceDialog(QDialog):
 
     def invalidate(self):
         self.plan = None
+        self.excluded.clear()
+        self.chapter_ranges.clear()
         self.results.clear()
-        self.apply_button.setEnabled(False)
+        for button in (self.select_all, self.select_none, self.previous, self.next, self.apply_button):
+            button.setEnabled(False)
+        self.apply_button.setText("应用已选 0 处")
         self.preview.setEnabled(bool(self.query.text()))
         self.save_rule.setEnabled(bool(self.query.text()))
         self.status.setText("输入查找文字并预览变更。" if not self.query.text() else "点击预览替换查看变更。")
@@ -215,35 +243,79 @@ class BookReplaceDialog(QDialog):
         if not plan.replacements:
             self.status.setText(f"共命中 {plan.matches} 处，替换内容与原文相同。")
             return
-        summary = f"命中 {plan.matches} 处 · 将替换 {plan.replacements} 处 · 涉及 {len(plan.chapters)} 章"
-        if len(plan.hits) < plan.replacements:
-            summary += f" · 显示前 {len(plan.hits)} 处"
-        self.status.setText(summary)
-        for hit in plan.hits:
-            title = hit.chapter_title or "未命名章节"
-            item = QListWidgetItem(
-                f"{hit.chapter_index + 1}. {title}\n替换前 · {hit.before}\n替换后 · {hit.after}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, hit.chapter_index)
-            self.results.addItem(item)
-        self.results.setCurrentRow(0)
-        self.apply_button.setEnabled(True)
+        self.chapter_ranges = {chapter.index: chapter.hit_range for chapter in plan.chapters}
+        self.show_page(0)
+
+    def show_page(self, offset):
+        self.offset = offset
+        end = min(offset + PREVIEW_LIMIT, self.plan.replacements)
+        self.status.setText(f"命中 {self.plan.matches} 处 · 可替换 {self.plan.replacements} 处 · "
+                            f"当前显示 {offset + 1}–{end} 处")
+        with QSignalBlocker(self.results):
+            self.results.clear()
+            current = None
+            for number, hit in enumerate(self.plan.page(offset, PREVIEW_LIMIT), offset):
+                if current != hit.chapter_index:
+                    current = hit.chapter_index
+                    group = QTreeWidgetItem(self.results, [f"{current + 1}. {hit.chapter_title or '未命名章节'}"
+                                                           f" · 全章 {len(self.chapter_ranges[current])} 处"])
+                    group.setData(0, Qt.ItemDataRole.UserRole, current)
+                    group.setExpanded(True)
+                item = QTreeWidgetItem(group, [f"第 {number + 1} 处\n替换前 · {hit.before}\n替换后 · {hit.after}"])
+                item.setData(0, Qt.ItemDataRole.UserRole, number)
+            self.sync_checks()
+            self.results.setCurrentItem(self.results.topLevelItem(0).child(0))
+        self.previous.setEnabled(offset > 0)
+        self.next.setEnabled(end < self.plan.replacements)
+
+    def sync_checks(self):
+        checked, unchecked = Qt.CheckState.Checked, Qt.CheckState.Unchecked
+        with QSignalBlocker(self.results):
+            for i in range(self.results.topLevelItemCount()):
+                group = self.results.topLevelItem(i)
+                numbers = self.chapter_ranges[group.data(0, Qt.ItemDataRole.UserRole)]
+                off = sum(number in self.excluded for number in numbers)
+                state = unchecked if off == len(numbers) else Qt.CheckState.PartiallyChecked if off else checked
+                group.setCheckState(0, state)
+                for j in range(group.childCount()):
+                    child = group.child(j)
+                    number = child.data(0, Qt.ItemDataRole.UserRole)
+                    child.setCheckState(0, unchecked if number in self.excluded else checked)
+        count = self.plan.replacements - len(self.excluded)
+        self.apply_button.setText(f"应用已选 {count} 处")
+        self.apply_button.setEnabled(count > 0)
+        self.select_none.setEnabled(count > 0)
+        self.select_all.setEnabled(bool(self.excluded))
+
+    def toggle_hit(self, item, column):
+        value = item.data(0, Qt.ItemDataRole.UserRole)
+        numbers = self.chapter_ranges[value] if item.parent() is None else (value,)
+        if item.checkState(column) == Qt.CheckState.Checked:
+            self.excluded.difference_update(numbers)
+        else:
+            self.excluded.update(numbers)
+        self.sync_checks()
+
+    def select_everything(self, checked):
+        self.excluded = set() if checked else set(range(self.plan.replacements))
+        self.sync_checks()
 
     def accept(self):
-        if self.plan and self.plan.replacements:
-            item = self.results.currentItem()
-            self.review_index = item.data(Qt.ItemDataRole.UserRole) if item else self.plan.chapters[0].index
+        if self.plan and self.plan.replacements > len(self.excluded):
+            self.review_index = next(index for index, numbers in self.chapter_ranges.items()
+                                     if any(number not in self.excluded for number in numbers))
             super().accept()
 
 
 class BookCheckpointsDialog(QDialog):
-    def __init__(self, parent, checkpoints):
+    def __init__(self, parent, checkpoints, selected=None):
         super().__init__(parent)
         self.setWindowTitle("书稿检查点")
         self.resize(560, 440)
         self.checkpoints = checkpoints
         self.create_label = None
         self.selected_checkpoint = None
+        self.compare_requested = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 16)
@@ -271,6 +343,10 @@ class BookCheckpointsDialog(QDialog):
         layout.addWidget(_status("恢复会先保存当前版本，再以未保存的工程打开所选版本。"))
 
         buttons = _close_buttons(self)
+        self.compare_button = buttons.addButton("与当前书稿比较", QDialogButtonBox.ButtonRole.ActionRole)
+        self.compare_button.setEnabled(False)
+        self.compare_button.setAutoDefault(False)
+        self.compare_button.clicked.connect(self.compare)
         self.restore_button = buttons.addButton("恢复所选版本", QDialogButtonBox.ButtonRole.AcceptRole)
         self.restore_button.setObjectName("primary")
         self.restore_button.setAutoDefault(False)
@@ -283,7 +359,7 @@ class BookCheckpointsDialog(QDialog):
             local_time = checkpoint.created_at.astimezone()
             self.results.addItem(f"{checkpoint.label}\n{local_time:%Y-%m-%d %H:%M:%S}")
         if checkpoints:
-            self.results.setCurrentRow(0)
+            self.results.setCurrentRow(next((i for i, item in enumerate(checkpoints) if item.path == selected), 0))
         self.name.setFocus()
 
     def select_checkpoint(self, row):
@@ -295,6 +371,11 @@ class BookCheckpointsDialog(QDialog):
         else:
             self.details.setText("请选择一个版本。" if self.checkpoints else "当前书稿还没有检查点。")
         self.restore_button.setEnabled(row >= 0)
+        self.compare_button.setEnabled(row >= 0)
+
+    def compare(self):
+        self.compare_requested = True
+        self.accept()
 
     def create(self):
         self.create_label = self.name.text().strip() or "手动检查点"
@@ -329,6 +410,8 @@ def _replace_current_book(studio, spelling=None):
     if result != QDialog.DialogCode.Accepted:
         return
     plan = dialog.plan
+    selected = frozenset(range(plan.replacements)).difference(dialog.excluded) if dialog.excluded else None
+    count = len(selected) if selected is not None else plan.replacements
     revision = studio.edit_revision
     row = dialog.review_index
 
@@ -337,11 +420,11 @@ def _replace_current_book(studio, spelling=None):
             studio.error("书稿已有变化，请重新预览替换。")
             return
         studio.adopt_book_edit(revised, row)
-        studio.statusBar().showMessage(f"已替换 {plan.replacements} 处 · 已保存替换前检查点。")
+        studio.statusBar().showMessage(f"已替换 {count} 处 · 已保存替换前检查点。")
 
     studio.start_task(
         "正在保存替换前检查点…",
-        lambda: replace_with_checkpoint(studio.workspace, book, plan),
+        lambda: replace_with_checkpoint(studio.workspace, book, plan, selected),
         complete,
     )
 
@@ -353,7 +436,7 @@ def show_book_checkpoints(studio) -> None:
     studio.flush_current_edits(lambda: _manage_checkpoints(studio))
 
 
-def _manage_checkpoints(studio):
+def _manage_checkpoints(studio, selected=None):
     book = studio.book
     workspace = studio.workspace
     try:
@@ -361,8 +444,10 @@ def _manage_checkpoints(studio):
     except (OSError, ValueError) as exc:
         studio.error(str(exc))
         return
-    dialog = BookCheckpointsDialog(studio, checkpoints)
-    if dialog.exec() != QDialog.DialogCode.Accepted:
+    dialog = BookCheckpointsDialog(studio, checkpoints, selected)
+    result = dialog.exec()
+    dialog.deleteLater()
+    if result != QDialog.DialogCode.Accepted:
         return
     if dialog.create_label is not None:
         studio.start_task(
@@ -375,11 +460,28 @@ def _manage_checkpoints(studio):
     checkpoint = dialog.selected_checkpoint
     revision = studio.edit_revision
 
-    def load():
+    def read_checkpoint():
         try:
-            restored = workspace.load_checkpoint(book, checkpoint)
+            return workspace.load_checkpoint(book, checkpoint)
         except (BadZipFile, KeyError, OSError, ValueError) as exc:
             raise ValueError(f"无法打开所选检查点。{exc}") from exc
+
+    if dialog.compare_requested:
+        from checkpoint_compare import compare_books
+        from checkpoint_compare_dialog import CheckpointCompareDialog
+
+        def present(changes):
+            from PySide6.QtCore import QTimer
+            view = CheckpointCompareDialog(studio, checkpoint.label, changes)
+            view.exec()
+            view.deleteLater()
+            QTimer.singleShot(0, lambda: _manage_checkpoints(studio, checkpoint.path))
+
+        studio.start_task("正在比较检查点…", lambda: compare_books(read_checkpoint(), book), present)
+        return
+
+    def load():
+        restored = read_checkpoint()
         workspace.save_checkpoint(book, f"恢复“{checkpoint.label}”前")
         return restored
 

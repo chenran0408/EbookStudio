@@ -158,10 +158,10 @@ def _decode_rebuilt(source: str, xhtml: bool) -> str:
     return _REFERENCE.sub(lambda match: _reference_value(match.group(), True) or match.group(), source)
 
 
-def _excerpt(text, start, end):
+def _excerpt(text, start, end, replacement=None):
     left = max(0, start - _CONTEXT)
     right = min(len(text), end + _CONTEXT)
-    selected = text[start:end]
+    selected = text[start:end] if replacement is None else replacement
     if len(selected) > _CONTEXT * 2:
         selected = selected[:_CONTEXT] + "…" + selected[-_CONTEXT:]
     return (
@@ -179,11 +179,60 @@ class ReplacementHit:
 
 
 @dataclass(frozen=True)
+class TextRun:
+    """Changes in one decoded text run. Its HTML character references retain their spelling."""
+    left: int
+    right: int
+    first_hit: int
+    parts: list
+    text: str
+    edits: list[tuple[int, int, str]]
+    xhtml: bool
+
+    def render(self, selected):
+        boundaries = list(accumulate((len(value) for _, value in self.parts), initial=0))
+        raw, decoded = [], []
+        cursor = 0
+        for number, (start, end, new) in enumerate(self.edits, self.first_hit):
+            if selected is not None and number not in selected:
+                continue
+            raw.extend((_original_slice(self.parts, boundaries, cursor, start), escape(new, quote=False)))
+            decoded.extend((self.text[cursor:start], new))
+            cursor = end
+        if not raw:
+            return None
+        raw.append(_original_slice(self.parts, boundaries, cursor, len(self.text)))
+        decoded.append(self.text[cursor:])
+        source, visible = "".join(raw), "".join(decoded)
+        if '<' in source or (self.xhtml and ']]>' in source) or _decode_rebuilt(source, self.xhtml) != visible:
+            # Editing beside a literal angle bracket or ampersand can create markup.
+            return escape(visible, quote=False)
+        return source
+
+
+@dataclass(frozen=True)
 class ChapterReplacement:
     index: int
+    title: str
     path: str
     original: str
-    revised: str
+    runs: list[TextRun]
+
+    @property
+    def hit_range(self):
+        last = self.runs[-1]
+        return range(self.runs[0].first_hit, last.first_hit + len(last.edits))
+
+    def render(self, selected):
+        parts = []
+        cursor = 0
+        for run in self.runs:
+            revised = run.render(selected)
+            if revised is not None:
+                parts.extend((self.original[cursor:run.left], revised))
+                cursor = run.right
+        parts.append(self.original[cursor:])
+        return "".join(parts)
 
 
 @dataclass(frozen=True)
@@ -192,9 +241,28 @@ class ReplacementPlan:
     matches: int
     replacements: int
     chapters: tuple[ChapterReplacement, ...]
-    hits: tuple[ReplacementHit, ...]
+    preview_limit: int
 
-    def apply(self, book: Book) -> None:
+    def page(self, start: int, limit: int):
+        """Materialize just the requested excerpts, using the original context around each edit."""
+        stop = min(start + limit, self.replacements)
+        for chapter in self.chapters:
+            if chapter.hit_range.stop <= start:
+                continue
+            if chapter.hit_range.start >= stop:
+                break
+            for run in chapter.runs:
+                for i in range(max(0, start - run.first_hit), min(len(run.edits), stop - run.first_hit)):
+                    left, right, new = run.edits[i]
+                    before = _excerpt(run.text, left, right)
+                    after = _excerpt(run.text, left, right, new)
+                    yield ReplacementHit(chapter.index, chapter.title, before, after)
+
+    @property
+    def hits(self):
+        return tuple(self.page(0, self.preview_limit))
+
+    def apply(self, book: Book, selected: frozenset[int] | None = None) -> None:
         if book.identifier != self.identifier or any(
             change.index >= len(book.chapters) or
             (book.chapters[change.index].path, book.chapters[change.index].html) != (change.path, change.original)
@@ -202,16 +270,14 @@ class ReplacementPlan:
         ):
             raise ValueError("书稿已有变化，请重新预览替换。")
         for change in self.chapters:
-            book.chapters[change.index].html = change.revised
+            book.chapters[change.index].html = change.render(selected)
 
 
-def _replace_run(parts, pattern, replacement, regular, timeout, xhtml, preview_limit):
-    text = "".join(value for _, value in parts)
+def _find_edits(text, pattern, replacement, regular, timeout):
     if not text.strip():
-        return None, 0, 0, []
-    boundaries = list(accumulate((len(value) for _, value in parts), initial=0))
-    raw_parts, revised_parts, previews = [], [], []
-    cursor = matches = replacements = offset = 0
+        return 0, []
+    edits = []
+    matches = 0
     for match in pattern.finditer(text, timeout=timeout):
         matches += 1
         new = match.expand(replacement) if regular else replacement
@@ -219,27 +285,8 @@ def _replace_run(parts, pattern, replacement, regular, timeout, xhtml, preview_l
             continue
         if _INVALID_XML.search(new):
             raise ValueError("替换文字含有 EPUB 正文无法保存的控制字符。")
-        begin, end = match.span()
-        raw_parts.extend((_original_slice(parts, boundaries, cursor, begin), escape(new, quote=False)))
-        revised_parts.extend((text[cursor:begin], new))
-        if len(previews) < preview_limit:
-            previews.append((begin, end, begin + offset, begin + offset + len(new)))
-        offset += len(new) - (end - begin)
-        cursor = end
-        replacements += 1
-    if not replacements:
-        return None, matches, 0, []
-    raw_parts.append(_original_slice(parts, boundaries, cursor, len(text)))
-    revised_parts.append(text[cursor:])
-    revised = "".join(revised_parts)
-    raw = "".join(raw_parts)
-    if '<' in raw or (xhtml and ']]>' in raw) or _decode_rebuilt(raw, xhtml) != revised:
-        # Editing beside a literal angle bracket or ampersand can create markup.
-        raw = escape(revised, quote=False)
-    return raw, matches, replacements, [
-        (_excerpt(text, start, end), _excerpt(revised, new_start, new_end))
-        for start, end, new_start, new_end in previews
-    ]
+        edits.append((match.start(), match.end(), new))
+    return matches, edits
 
 
 def _validate_template(pattern, replacement):
@@ -268,37 +315,35 @@ def preview_replacement(book: Book, query: str, replacement: str, *,
         raise ValueError("替换文字含有 EPUB 正文无法保存的控制字符。")
     deadline = monotonic() + _REGEX_SECONDS
     matches = replacements = 0
-    changes, hits = [], []
+    changes = []
     try:
         for index, chapter in enumerate(book.chapters):
             markup = _MarkupText(chapter.html)
-            parts = []
-            cursor = 0
+            runs = []
             for start, end in markup.spans:
                 for left, right, run in _text_runs(chapter.html, start, end, markup.xhtml):
                     timeout = deadline - monotonic() if regular else None
                     if timeout is not None and timeout <= 0:
                         raise TimeoutError()
-                    revised, found, changed, previews = _replace_run(
-                        run, pattern, replacement, regular, timeout, markup.xhtml, preview_limit - len(hits),
-                    )
+                    text = "".join(value for _, value in run)
+                    found, edits = _find_edits(text, pattern, replacement, regular, timeout)
                     matches += found
-                    replacements += changed
-                    if revised is not None:
-                        parts.extend((chapter.html[cursor:left], revised))
-                        cursor = right
-                        hits.extend(ReplacementHit(index, chapter.title, before, after) for before, after in previews)
-            if parts:
-                parts.append(chapter.html[cursor:])
-                changes.append(ChapterReplacement(index, chapter.path, chapter.html, "".join(parts)))
+                    if edits:
+                        runs.append(TextRun(left, right, replacements, run, text, edits, markup.xhtml))
+                        replacements += len(edits)
+            if runs:
+                changes.append(ChapterReplacement(index, chapter.title, chapter.path, chapter.html, runs))
     except TimeoutError as exc:
         raise ValueError("正则表达式搜索超时，请缩小匹配范围。") from exc
-    return ReplacementPlan(book.identifier, matches, replacements, tuple(changes), tuple(hits))
+    return ReplacementPlan(book.identifier, matches, replacements, tuple(changes), preview_limit)
 
 
-def replace_with_checkpoint(workspace: Workspace, book: Book, plan: ReplacementPlan) -> Book:
+def replace_with_checkpoint(workspace: Workspace, book: Book, plan: ReplacementPlan,
+                            selected: frozenset[int] | None = None) -> Book:
     """Return a revised copy only after the current book's checkpoint is published."""
+    if selected == frozenset():
+        return book
     revised = deepcopy(book)
-    plan.apply(revised)
+    plan.apply(revised, selected)
     workspace.save_checkpoint(book, "批量替换前")
     return revised

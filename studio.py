@@ -14,7 +14,7 @@ import sys
 from urllib.parse import unquote, urlsplit
 
 from lxml import etree, html
-from PySide6.QtCore import QObject, QSignalBlocker, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QLibraryInfo, QObject, QSignalBlocker, Qt, QThread, QTimer, QTranslator, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence, QShortcut
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -42,6 +42,7 @@ from book_typography_dialog import show_typography
 from ebook_core import Asset, Book, Chapter, asset_href, resolve_href
 from epub_validation_dialog import EpubCheckDialog
 from first_book import first_book
+from file_drops import FileDrops
 from inline_toc import show_inline_toc
 import capture
 from capture_review import CaptureProfilesDialog, WebUpdateDialog
@@ -789,7 +790,7 @@ class Studio(QMainWindow):
         palette_action = view_menu.addAction("查找命令…", self.open_command_palette)
         palette_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
         self.command_button.clicked.connect(palette_action.trigger)
-        self.setAcceptDrops(True)
+        self.file_drops = FileDrops(self, lambda: self.task is None, self.receive_files)
         self.task_progress = QProgressBar()
         self.task_progress.setAccessibleName("当前任务进度")
         self.task_progress.setFixedWidth(135)
@@ -1512,13 +1513,15 @@ class Studio(QMainWindow):
         if name:
             self.open_path(Path(name))
 
-    def open_library(self, *, full_text=False):
+    def open_library(self, *, full_text=False, add_paths=()):
         try:
             library = BookLibrary(self.workspace.directory)
         except (OSError, sqlite3.Error) as exc:
             self.error(f"无法打开本机书库。\n{exc}")
             return
         dialog = LibraryTextDialog(self, library) if full_text else BookLibraryDialog(self, library)
+        if add_paths:
+            dialog.add_paths(add_paths)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             hit = dialog.hit if full_text else dialog.chosen_hit
             path = hit.path if hit else dialog.chosen_path
@@ -1854,21 +1857,46 @@ class Studio(QMainWindow):
 
             self.start_task("正在运行 EPUBCheck…", lambda: inspect_epub(path), show_report)
 
-    def dragEnterEvent(self, event):
-        if self.task is None and any(url.isLocalFile() for url in event.mimeData().urls()):
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+    def receive_files(self, paths):
         if len(paths) == 1:
-            path = Path(paths[0])
+            path = paths[0]
             if path.suffix.lower() in SCAN_IMAGE_TYPES:
                 self.import_scan(path=path)
             else:
                 self.open_path(path)
-        elif paths:
+            return
+        books = [path for path in paths if path.suffix.lower() in {".epub", ".bookproj"}]
+        if not books:
             self.batch_convert(paths)
-        event.acceptProposedAction()
+            return
+        convertible = [path for path in paths if conversion.targets_for(path)]
+        dialog = QMessageBox(QMessageBox.Icon.Question, "拖入多个文件",
+                             f"要如何处理这 {len(paths)} 个文件？", parent=self)
+        text = f"可加入书库 {len(books)} 本，可批量转换 {len(convertible)} 项。"
+        if len(books) != len(paths) or len(convertible) != len(paths):
+            text += " 每个操作只处理它支持的文件。"
+            details = []
+            for path in paths:
+                actions = []
+                if path in books:
+                    actions.append("加入书库")
+                if path in convertible:
+                    actions.append("批量转换")
+                details.append(f"{path.name} · {' / '.join(actions) or '不支持'}")
+            dialog.setDetailedText("\n".join(details))
+        dialog.setInformativeText(text)
+        add = dialog.addButton("加入书库", QMessageBox.ButtonRole.AcceptRole)
+        convert = dialog.addButton("批量转换", QMessageBox.ButtonRole.ActionRole)
+        convert.setEnabled(bool(convertible))
+        dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(add)
+        dialog.exec()
+        chosen = dialog.clickedButton()
+        if chosen is add:
+            self.open_library(add_paths=books)
+        elif chosen is convert:
+            self.batch_convert(convertible)
+        dialog.deleteLater()
 
     def closeEvent(self, event):
         if self.can_leave():
@@ -1888,6 +1916,9 @@ def missing_converters(source_formats, target, statuses):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("电子书工作台")
+    translator = QTranslator(app)
+    if translator.load("qtbase_zh_CN", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(translator)
     font = QFont("Microsoft YaHei UI", 10)
     font.setFamilies(["Microsoft YaHei UI", "Microsoft YaHei", "DengXian", "Segoe UI"])
     app.setFont(font)

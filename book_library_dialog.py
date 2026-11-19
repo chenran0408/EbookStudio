@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from book_library_search_dialog import LibraryTextDialog
 from book_library import BOOK_FILTER, BOOK_READ_ERRORS, BookLibrary, LibraryEntry, LibraryImport, tag_names
+from file_drops import FileDrops
 
 
 def _field(form, name, value=''):
@@ -105,6 +106,7 @@ class BookLibraryDialog(QDialog):
         self.entries: dict[int, LibraryEntry] = {}
         self.available: set[int] = set()
         self.import_task = None
+        self.file_drops = FileDrops(self, lambda: self.import_task is None, self.add_paths)
         self.setWindowTitle('书库')
         self.resize(840, 490)
         layout = QVBoxLayout(self)
@@ -118,7 +120,7 @@ class BookLibraryDialog(QDialog):
         self.search.setClearButtonEnabled(True)
         self.add_button = QPushButton('批量添加书籍…')
         self.add_button.setObjectName('primary')
-        self.add_button.setToolTip('再次添加同一文件可更新原书资料。')
+        self.add_button.setToolTip('可拖入 EPUB 和 .bookproj 文件，再次添加会更新原书资料。')
         header.addWidget(self.search, 1)
         self.full_text_button = QPushButton('搜索正文…')
         self.full_text_button.clicked.connect(self.search_text)
@@ -261,7 +263,7 @@ class BookLibraryDialog(QDialog):
                 self.table.setCurrentItem(self.table.topLevelItem(0))
         count = self.table.topLevelItemCount()
         self.count.setText(f'{count} / {len(self.entries)} 本')
-        self.empty.setText('调整搜索词或筛选条件。' if self.entries else '点击「批量添加书籍」加入书稿或 EPUB。')
+        self.empty.setText('调整搜索词或筛选条件。' if self.entries else '将 EPUB 或 .bookproj 文件拖到这里，或点击「批量添加书籍」。')
         self.results.setCurrentWidget(self.table if count else self.empty)
         self.update_actions()
 
@@ -289,6 +291,8 @@ class BookLibraryDialog(QDialog):
             self.add_paths([Path(path) for path in paths])
 
     def add_paths(self, paths):
+        if self.import_task is not None:
+            return
         self.import_task = LibraryImportTask(self, self.library, paths)
         self.import_task.loaded.connect(self.show_import_result)
         self.import_task.failed.connect(lambda error: self.note(f'无法更新书库。{error}'))
@@ -301,9 +305,10 @@ class BookLibraryDialog(QDialog):
 
     @Slot(object)
     def show_import_result(self, result: LibraryImport):
-        summary = f'添加 {result.added} 本，更新 {result.refreshed} 本。'
+        summary = f'新加入 {result.added} 本，已在书库 {result.refreshed} 本。'
         if result.errors:
-            summary += f' {len(result.errors)} 个文件无法读取。'
+            path, reason = result.errors[0]
+            summary += f' {len(result.errors)} 项未加入。{path.name} · {reason}'
         self.note(summary)
         try:
             self.reload()
