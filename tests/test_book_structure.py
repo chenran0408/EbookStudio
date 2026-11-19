@@ -8,7 +8,7 @@ from lxml import etree
 from PIL import Image
 
 from book_resources import replacement_asset, resource_category, resource_references
-from book_structure import heading_toc, merge_chapters, split_chapter, split_choices
+from book_structure import edit_toc_entry, heading_toc, merge_chapters, move_toc_entry, split_chapter, split_choices, toc_destinations
 from ebook_core import Asset, Book, Chapter, asset_href, resolve_href
 from epub_io import EPUB, OPF, XHTML, current_toc, open_epub, write_epub
 
@@ -29,6 +29,51 @@ def toc_links(archive):
 
 
 class BookStructureTests(unittest.TestCase):
+    def test_manual_toc_edit_creates_anchors_and_round_trips_without_rewriting_chapters(self):
+        book = Book('手动目录', chapters=[
+            Chapter('第一章', '<p id="heading-1">开场</p><h2>进入正题</h2>', path='one.xhtml'),
+            Chapter('第二章', '<h2 id="现有">已有位置</h2>', path='two.xhtml'),
+        ])
+        target = toc_destinations(book, 0)[1]
+        staged = edit_toc_entry(book, 0, ' 开始阅读 ', target, 0).book
+        self.assertIsNone(book.toc_entries)
+        self.assertNotIn('heading-1-2', book.chapters[0].html)
+        self.assertEqual([chapter.title for chapter in staged.chapters], ['第一章', '第二章'])
+        self.assertIn('id="heading-1-2"', staged.chapters[0].html)
+        target = toc_destinations(staged, 1)[1]
+        staged = edit_toc_entry(staged, 1, '原有位置', target, 1).book
+        self.assertEqual(staged.chapters[1].html, book.chapters[1].html)
+        with self.assertRaisesRegex(ValueError, '目录标题'):
+            edit_toc_entry(staged, 1, ' ', target, 1)
+        with TemporaryDirectory() as temp:
+            folder = Path(temp)
+            project, epub = folder / 'Manual.bookproj', folder / 'Manual.epub'
+            staged.save(project)
+            write_epub(Book.load(project), epub)
+            with ZipFile(epub) as archive:
+                self.assertEqual(toc_links(archive), [('one.xhtml#heading-1-2', '开始阅读'),
+                                                      ('two.xhtml#%E7%8E%B0%E6%9C%89', '原有位置')])
+
+    def test_toc_branch_moves_keep_subentries_and_do_not_change_spine(self):
+        chapters = [Chapter(title, '<p>正文</p>', level, path=f'{i}.xhtml')
+                    for i, (title, level) in enumerate([('甲', 1), ('乙', 2), ('乙下一层', 3),
+                                                        ('丙', 2), ('丁', 1), ('戊', 1)])]
+        book = Book(chapters=chapters)
+        edit = move_toc_entry(book, 1, 'outdent', 0)
+        labels = lambda project: [(entry['title'], entry['level']) for entry in current_toc(project)]
+        self.assertEqual(labels(edit.book), [('甲', 1), ('丙', 2), ('乙', 1), ('乙下一层', 2), ('丁', 1), ('戊', 1)])
+        self.assertEqual(edit.toc_index, 2)
+        edit = move_toc_entry(edit.book, 2, 'down', 0)
+        self.assertEqual(labels(edit.book), [('甲', 1), ('丙', 2), ('丁', 1), ('乙', 1), ('乙下一层', 2), ('戊', 1)])
+        edit = move_toc_entry(edit.book, 3, 'indent', 0)
+        self.assertEqual(labels(edit.book), [('甲', 1), ('丙', 2), ('丁', 1), ('乙', 2), ('乙下一层', 3), ('戊', 1)])
+        edit = move_toc_entry(edit.book, 2, 'up', 0)
+        self.assertEqual(labels(edit.book), [('丁', 1), ('乙', 2), ('乙下一层', 3), ('甲', 1), ('丙', 2), ('戊', 1)])
+        self.assertEqual(edit.book.chapters, chapters)
+        self.assertIsNone(book.toc_entries)
+        with self.assertRaisesRegex(ValueError, '无法'):
+            move_toc_entry(book, 0, 'indent', 0)
+
     def test_heading_toc_round_trips_and_includes_later_chapters(self):
         draft = Book('一本书', chapters=[Chapter('第一章', '<h1>第一章</h1><h2>小节</h2><h3 id="附录">细节</h3>',
                                              path='chap.xhtml')])

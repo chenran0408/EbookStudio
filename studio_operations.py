@@ -1,6 +1,7 @@
 """Book workflows shared by the desktop window and the local agent tools."""
 from __future__ import annotations
 
+import json
 import mimetypes
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import capture
 import conversion
 from ebook_core import Asset, Book, Chapter, publish_file, resolve_href
 from epub_io import open_epub, write_epub
+from epub_validation import EpubCheckReport
 from workspace_tools import conversion_stem, epubcheck_jar, plan_destinations
 
 if Path(r"D:\Dev\Cache\ebook-studio-browsers").is_dir():
@@ -33,7 +35,7 @@ def safe_name(title: str) -> str:
     return re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", title).strip(" .") or "电子书"
 
 
-def run_epubcheck(path: Path, *, required: bool = True) -> str | None:
+def _epubcheck_process(path: Path, *, required: bool, options=()):
     jar = epubcheck_jar()
     java = shutil.which("java")
     if java is None or jar is None:
@@ -44,11 +46,37 @@ def run_epubcheck(path: Path, *, required: bool = True) -> str | None:
             "或把 EPUBCheck 解压到 %LOCALAPPDATA%\\EbookStudio\\tools。"
         )
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    result = subprocess.run([java, "-jar", str(jar), str(path)], capture_output=True, timeout=180, creationflags=flags)
-    report = (result.stdout + result.stderr).decode("utf-8", errors="replace").strip()
-    if result.returncode:
+    result = subprocess.run([java, "-jar", str(jar), *options, str(path)], capture_output=True, timeout=180,
+                            creationflags=flags)
+    return result.returncode, (result.stdout + result.stderr).decode("utf-8", errors="replace").strip()
+
+
+def run_epubcheck(path: Path, *, required: bool = True) -> str | None:
+    result = _epubcheck_process(path, required=required)
+    if result is None:
+        return None
+    exit_code, report = result
+    if exit_code:
         raise ValueError(report)
     return report
+
+
+def inspect_epub(path: Path, *, required: bool = True) -> EpubCheckReport | None:
+    with TemporaryDirectory(prefix="ebook-studio-check-") as work:
+        report_path = Path(work) / "report.json"
+        result = _epubcheck_process(path, required=required, options=("--json", str(report_path),
+                                                                     "--maxOfEachMessage", "unlimited"))
+        if result is None:
+            return None
+        exit_code, output = result
+        try:
+            data = json.loads(report_path.read_text(encoding="utf-8"))
+            report = EpubCheckReport.from_json(data)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ValueError(output or "EPUBCheck 未生成可读取的报告。") from exc
+        if exit_code and report.valid:
+            raise ValueError(output or "EPUBCheck 未完成校验。")
+        return report
 
 
 def target_path(folder: Path, stem: str, format_name: str) -> Path:
@@ -71,6 +99,15 @@ def convert_files(paths, folder, format_name, *, plans=None, progress=None):
 
 
 def export_book(book, folder, name, formats, mobile, *, plans=None, progress=None):
+    outputs, errors, _ = _export_book(book, folder, name, formats, mobile, plans=plans, progress=progress)
+    return outputs, errors
+
+
+def export_book_with_report(book, folder, name, formats, mobile, *, plans=None, progress=None):
+    return _export_book(book, folder, name, formats, mobile, plans=plans, progress=progress, structured_report=True)
+
+
+def _export_book(book, folder, name, formats, mobile, *, plans, progress, structured_report=False):
     outputs, errors = [], []
     formats = list(formats)
     if plans is None:
@@ -78,7 +115,13 @@ def export_book(book, folder, name, formats, mobile, *, plans=None, progress=Non
     with TemporaryDirectory(prefix="ebook-studio-") as work:
         native = Path(work) / "book.epub"
         write_epub(book, native, mobile=mobile)
-        run_epubcheck(native, required=False)
+        report = None
+        if structured_report:
+            report = inspect_epub(native, required=False)
+            if report is not None and not report.valid:
+                return [], [], report
+        else:
+            run_epubcheck(native, required=False)
         comics = comic_pages(book) if set(formats) & {"pdf", "cbz"} else []
         comic_source = Path(work) / "comic.cbz"
         if comics and "pdf" in formats:
@@ -100,7 +143,7 @@ def export_book(book, folder, name, formats, mobile, *, plans=None, progress=Non
                 outputs.append(destination)
             except Exception as exc:
                 errors.append(f"{destination.name} · {exc}")
-    return outputs, errors
+    return outputs, errors, report
 
 
 def convert_to(source, destination, format_name, *, overwrite=True):

@@ -1,4 +1,4 @@
-"""Local recent projects, recoverable drafts, and book checkpoints."""
+"""Local project history, pinned files, recoverable drafts, and checkpoints."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -73,6 +73,7 @@ class Workspace:
         if self._drafts.parent != self.directory:
             raise ValueError('草稿目录必须位于工作区内')
         self._recent_path = self.directory / 'recent.json'
+        self._pinned_path = self.directory / 'pinned.json'
         self.own_draft = self._drafts / f'draft-{uuid4().hex}.bookproj'
         self._session_lock = self.own_draft.with_suffix('.lock')
         self._owner = _lock_file(self._session_lock, wait=True)
@@ -83,21 +84,24 @@ class Workspace:
         with _lock_file(self.directory / 'recent.lock', wait=True):
             yield
 
-    def _read_recent(self) -> list[Path]:
+    def _read_paths(self, store: Path) -> list[Path]:
         try:
-            records = json.loads(self._recent_path.read_text(encoding='utf-8'))
+            records = json.loads(store.read_text(encoding='utf-8'))
         except (FileNotFoundError, ValueError):
             return []
         if not isinstance(records, list):
             return []
-        return [
+        return list(dict.fromkeys(
             path for record in records
-            if isinstance(record, str) and (path := Path(record)).is_absolute() and path.is_file()
-        ][:_RECENT_LIMIT]
+            if isinstance(record, str) and (path := Path(record)).is_absolute()
+        ))
 
-    def _save_recent(self, records: list[Path]) -> None:
-        with publish_file(self._recent_path) as temporary:
-            data = [str(path) for path in records[:_RECENT_LIMIT]]
+    def _read_recent(self) -> list[Path]:
+        return [path for path in self._read_paths(self._recent_path) if path.is_file()][:_RECENT_LIMIT]
+
+    def _save_paths(self, store: Path, records: list[Path]) -> None:
+        with publish_file(store) as temporary:
+            data = [str(path) for path in records]
             temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
 
     def recent(self) -> list[Path]:
@@ -110,12 +114,27 @@ class Workspace:
         if not path.is_file():
             return
         with self._recent_lock():
-            self._save_recent([path, *(record for record in self._read_recent() if record != path)])
+            records = [path, *(record for record in self._read_recent() if record != path)]
+            self._save_paths(self._recent_path, records[:_RECENT_LIMIT])
 
     def forget(self, path: str | Path) -> None:
         path = Path(path).resolve()
         with self._recent_lock():
-            self._save_recent([record for record in self._read_recent() if record != path])
+            self._save_paths(self._recent_path, [record for record in self._read_recent() if record != path])
+
+    def pinned(self) -> list[Path]:
+        """Keep explicit pins even when their paths are temporarily unavailable."""
+        with self._recent_lock():
+            return self._read_paths(self._pinned_path)
+
+    def set_pinned(self, path: Path, enabled: bool) -> None:
+        path = path.resolve()
+        with self._recent_lock():
+            records = self._read_paths(self._pinned_path)
+            if enabled and path not in records:
+                self._save_paths(self._pinned_path, [path, *records])
+            elif not enabled and path in records:
+                self._save_paths(self._pinned_path, [record for record in records if record != path])
 
     def candidates(self) -> list[Path]:
         """List detached project drafts, latest save first."""

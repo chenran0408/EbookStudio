@@ -39,6 +39,24 @@ class WorkspaceTests(unittest.TestCase):
         workspace.remember(book)
         self.assertEqual(workspace.recent(), [book.resolve()])
 
+    def test_explicit_pin_survives_recent_limit_and_temporary_file_loss(self):
+        first, second = self.workspace(self.root), self.workspace(self.root)
+        book = self.root / '长期书稿.bookproj'
+        book.touch()
+        first.remember(book)
+        first.set_pinned(book, True)
+        for index in range(13):
+            newer = self.root / f'{index}.epub'
+            newer.touch()
+            second.remember(newer)
+        self.assertNotIn(book.resolve(), second.recent())
+        self.assertEqual(second.pinned(), [book.resolve()])
+
+        book.unlink()
+        self.assertEqual(first.pinned(), [book.resolve()])
+        second.set_pinned(book, False)
+        self.assertEqual(first.pinned(), [])
+
     def test_other_open_windows_cannot_list_or_discard_live_drafts(self):
         first, second = self.workspace(self.root), self.workspace(self.root)
         first.write_draft(Book('甲的草稿'))

@@ -1,4 +1,4 @@
-"""Previewable heading TOCs, chapter splits and adjacent chapter merges."""
+"""Previewable table of contents edits and chapter restructuring."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -39,6 +39,15 @@ class StructureEdit:
     chapter: int
     description: str
     relinked: int = 0
+    toc_index: int | None = None
+
+
+@dataclass(frozen=True)
+class TocDestination:
+    path: str
+    label: str
+    fragment: str = ''
+    heading_index: int | None = None
 
 
 def _headings(body):
@@ -56,6 +65,88 @@ def _unique_name(base, occupied):
         name = f'{base}-{index}'
         index += 1
     return name
+
+
+def toc_destinations(book: Book, chapter_index: int) -> list[TocDestination]:
+    chapter = book.chapters[chapter_index]
+    body = editable_chapter_document(book, chapter).find(_BODY)
+    targets = [TocDestination(chapter.path, '章节开头')]
+    for index, (node, title, rank) in enumerate(_headings(body), 1):
+        anchor = node.get('id') or node.get(f'{{{XML}}}id') or ''
+        targets.append(TocDestination(chapter.path, f'H{rank} · {title}', anchor, index if not anchor else None))
+    return targets
+
+
+def _editable_toc(book: Book) -> list[TocEntry]:
+    entries = current_toc(book)
+    previous = 0
+    for entry in entries:
+        entry['level'] = min(entry['level'], previous + 1)
+        previous = entry['level']
+    return entries
+
+
+def edit_toc_entry(book: Book, index: int, title: str, target: TocDestination, chapter: int) -> StructureEdit:
+    """Change an entry and create an anchor only if the chosen heading needs one."""
+    title = title.strip()
+    if not title:
+        raise ValueError('请输入目录标题。')
+    result = deepcopy(book)
+    entries = _editable_toc(result)
+    entry = entries[index]
+    anchor = target.fragment
+    if target.heading_index is not None:
+        destination = next(ch for ch in result.chapters if ch.path == target.path)
+        doc = editable_chapter_document(result, destination)
+        body = doc.find(_BODY)
+        heading, _, _ = next(item for i, item in enumerate(_headings(body), 1) if i == target.heading_index)
+        occupied = {value for node in doc.iter() for attr in _ID_ATTRIBUTES if (value := node.get(attr))}
+        occupied.update(name for node in doc.iter(f'{{{XHTML}}}a') if (name := node.get('name')))
+        anchor = _unique_name(f'heading-{target.heading_index}', occupied)
+        heading.set('id', anchor)
+        destination.html = _inner(body)
+    entry.update(title=title, path=target.path, fragment=anchor)
+    result.toc_entries = entries
+    preview = current_toc(result)
+    selected = next(i for i, item in enumerate(preview) if item == entry)
+    message = f'已编辑目录条目「{title}」。'
+    if len(preview) > len(entries):
+        message += '原章节保留默认目录条目。'
+    return StructureEdit(result, chapter, message, toc_index=selected)
+
+
+def _subtree_end(entries: list[TocEntry], index: int) -> int:
+    level = entries[index]['level']
+    return next((i for i in range(index + 1, len(entries)) if entries[i]['level'] <= level), len(entries))
+
+
+def move_toc_entry(book: Book, index: int, direction: str, chapter: int) -> StructureEdit:
+    """Move or renest a TOC branch, keeping its descendants attached."""
+    entries = _editable_toc(book)
+    level = entries[index]['level']
+    end = _subtree_end(entries, index)
+    previous = next((i for i in reversed(range(index)) if entries[i]['level'] <= level), None)
+    has_previous_sibling = previous is not None and entries[previous]['level'] == level
+    branch = entries[index:end]
+    remainder = entries[:index] + entries[end:]
+    position, difference = index, 0
+    if direction == 'up' and has_previous_sibling:
+        position = previous
+    elif direction == 'down' and end < len(entries) and entries[end]['level'] == level:
+        position = _subtree_end(entries, end) - len(branch)
+    elif direction == 'indent' and has_previous_sibling:
+        difference = 1
+    elif direction == 'outdent' and level > 1:
+        parent = next(i for i in reversed(range(index)) if entries[i]['level'] < level)
+        position = _subtree_end(entries, parent) - len(branch)
+        difference = -1
+    else:
+        raise ValueError('此目录条目无法沿所选方向移动。')
+    for entry in branch:
+        entry['level'] += difference
+    result = deepcopy(book)
+    result.toc_entries = remainder[:position] + branch + remainder[position:]
+    return StructureEdit(result, chapter, f'已调整目录条目「{branch[0]["title"]}」的位置。', toc_index=position)
 
 
 def heading_toc(book: Book) -> Book:

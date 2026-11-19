@@ -19,7 +19,7 @@ from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence, QShort
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
-    QApplication, QBoxLayout, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTabBar, QTabWidget,
@@ -33,17 +33,20 @@ from book_revision_dialogs import show_book_checkpoints, show_book_replace
 from book_search import select_search_result
 from book_structure_dialog import show_book_structure
 from ebook_core import Asset, Book, Chapter, asset_href, resolve_href
+from epub_validation_dialog import EpubCheckDialog
 import capture
 from capture_review import CaptureProfilesDialog, WebUpdateDialog
 from capture_update import CaptureProfile, apply_updates, collect_updates, profiles_for, remember_profile
+from command_palette import CommandPalette
 import conversion
 from ocr_import import DEFAULT_MODEL, IMAGE_TYPES as SCAN_IMAGE_TYPES, ocr_book
 from ocr_review import show_ocr_review
 from ocr_runtime import local_server
 from paddle_import import paddle_book
+from project_shelf import ProjectShelf
 from studio_dialogs import ExportDialog, ScanDialog
 from studio_operations import (
-    LABELS, capture_pages, comic_pages, convert_files, export_book, read_book, run_epubcheck, safe_name,
+    LABELS, capture_pages, comic_pages, convert_files, export_book_with_report, inspect_epub, read_book, safe_name,
 )
 from studio_theme import STYLE
 from workspace import Workspace
@@ -493,6 +496,9 @@ class Studio(QMainWindow):
         self.project_state = QLabel(objectName="projectState")
         identity.addWidget(self.project_state)
         bar.addLayout(identity, 1)
+        self.command_button = QPushButton("查找命令")
+        self.command_button.setToolTip("查找命令（Ctrl+Shift+P）")
+        bar.addWidget(self.command_button)
         self.project_actions = QWidget()
         actions = QHBoxLayout(self.project_actions)
         actions.setContentsMargins(0, 0, 0, 0)
@@ -696,30 +702,46 @@ class Studio(QMainWindow):
         self.recent_menu.aboutToShow.connect(self.refresh_recent_menu)
         file_menu.addAction("恢复草稿…", self.choose_recovery)
         revision_menu = self.menuBar().addMenu("校对")
+        self.check_book_action = revision_menu.addAction("检查书稿…", self.check_book_quality)
         self.replace_text_action = revision_menu.addAction("整书查找替换…", lambda: show_book_replace(self))
         self.replace_text_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
         self.checkpoints_action = revision_menu.addAction("检查点…", lambda: show_book_checkpoints(self))
         self.ocr_review_action = revision_menu.addAction("OCR 原图对照…", self.review_current_scan)
         view_menu = self.menuBar().addMenu("视图")
         view_menu.addAction("开始页", self.show_start)
+        self.show_book_action = view_menu.addAction("返回书稿", self.show_book)
         jump = view_menu.addAction("搜索章节标题", self.focus_chapter_filter)
         jump.setShortcut(QKeySequence("Ctrl+P"))
         self.search_text_action = view_menu.addAction("搜索正文", self.search_book_text)
         self.search_text_action.setShortcut(QKeySequence("Ctrl+Shift+F"))
         convert_menu = self.menuBar().addMenu("出书")
         convert_menu.addAction("导入章节文件", self.import_files)
-        convert_menu.addAction("识别扫描 PDF 或图片", self.import_scan)
+        scan_action = convert_menu.addAction("识别扫描 PDF 或图片", self.import_scan)
+        scan_action.setProperty("commandKeywords", "OCR 扫描件 照片 文字识别")
+        convert_menu.addAction("采集网页…", self.capture_urls)
+        self.book_info_action = convert_menu.addAction("书籍资料…", self.edit_book_info)
         self.structure_action = convert_menu.addAction("目录和章节管理…", self.manage_book_structure)
         self.resources_action = convert_menu.addAction("书稿资源…", self.manage_book_resources)
         self.web_update_action = convert_menu.addAction("网页增量采集…", self.open_web_profiles)
         convert_menu.addAction("编辑样式表", self.edit_stylesheet)
         convert_menu.addAction("批量转换格式", self.batch_convert)
-        convert_menu.addAction("导出 EPUB 或其他格式", self.export)
-        convert_menu.addAction("检查 EPUB 文件", self.check_epub)
+        self.export_action = convert_menu.addAction("导出 EPUB 或其他格式", self.export)
+        self.export_action.setProperty("commandKeywords", "PDF DOCX TXT HTML")
+        check_epub_action = convert_menu.addAction("检查 EPUB 文件", self.check_epub)
+        check_epub_action.setProperty("commandKeywords", "EPUBCheck 校验 验证")
         tools_menu = self.menuBar().addMenu("工具")
         tools_menu.addAction("检查本机工具", self.show_tools)
         tools_menu.addAction("Agent 接入说明", lambda: self.open_document("Agent接入.md"))
         tools_menu.addAction("第三方软件与许可", lambda: self.open_document("THIRD_PARTY.md"))
+        self.palette_commands = tuple(
+            (menu.title(), action)
+            for menu in (file_menu, revision_menu, view_menu, convert_menu, tools_menu)
+            for action in menu.actions()
+            if not action.isSeparator() and action.menu() is None
+        )
+        palette_action = view_menu.addAction("查找命令…", self.open_command_palette)
+        palette_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self.command_button.clicked.connect(palette_action.trigger)
         self.setAcceptDrops(True)
         self.task_progress = QProgressBar()
         self.task_progress.setAccessibleName("当前任务进度")
@@ -731,8 +753,22 @@ class Studio(QMainWindow):
         self.output_button.clicked.connect(self.open_output_folder)
         self.statusBar().addPermanentWidget(self.output_button)
         self.output_button.hide()
+        self.last_export_report = None
+        self.export_report_button = QPushButton("导出校验报告")
+        self.export_report_button.clicked.connect(self.show_export_report)
+        self.statusBar().addPermanentWidget(self.export_report_button)
+        self.export_report_button.hide()
         self.statusBar().showMessage("新建书籍、打开文件，或直接把文件拖到这里。")
         self.refresh_welcome()
+
+    def open_command_palette(self):
+        if self.task is not None:
+            return
+        dialog = CommandPalette(self, self.palette_commands)
+        dialog.move(self.geometry().center().x() - dialog.width() // 2, self.geometry().top() + 56)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.command is not None:
+            dialog.command.trigger()
+        dialog.deleteLater()
 
     def build_welcome(self):
         scroll = QScrollArea(objectName="welcomeScroll")
@@ -782,8 +818,8 @@ class Studio(QMainWindow):
         notice.addWidget(recovery)
         blocks.addWidget(self.draft_notice)
 
-        self.start_columns = QBoxLayout(QBoxLayout.Direction.LeftToRight)
-        self.start_columns.setSpacing(18)
+        columns = QHBoxLayout()
+        columns.setSpacing(18)
         actions = QWidget()
         action_layout = QVBoxLayout(actions)
         action_layout.setContentsMargins(0, 0, 0, 0)
@@ -825,54 +861,28 @@ class Studio(QMainWindow):
         extras.addStretch()
         action_layout.addLayout(extras)
         action_layout.addStretch()
-        self.start_columns.addWidget(actions, 3)
+        columns.addWidget(actions, 3)
 
-        recent_panel = QWidget(objectName="recentPanel")
-        recent = QVBoxLayout(recent_panel)
-        recent.setContentsMargins(14, 12, 14, 14)
-        recent.setSpacing(10)
-        recent.addWidget(QLabel("最近打开", objectName="section"))
-        self.recent_empty = QLabel("打开或保存的书稿会显示在这里。", objectName="muted")
-        self.recent_empty.setWordWrap(True)
-        recent.addWidget(self.recent_empty)
-        self.recent_list = QListWidget(objectName="recentList")
-        self.recent_list.setAccessibleName("最近打开的书籍与工程")
-        self.recent_list.itemActivated.connect(
-            lambda item: self.open_path(Path(item.data(Qt.ItemDataRole.UserRole)))
-        )
-        recent.addWidget(self.recent_list)
-        recent.addStretch()
-        self.start_columns.addWidget(recent_panel, 2, Qt.AlignmentFlag.AlignTop)
-        blocks.addLayout(self.start_columns)
+        self.project_shelf = ProjectShelf(self.workspace)
+        self.project_shelf.open_requested.connect(self.open_path)
+        self.project_shelf.pin_failed.connect(self.error)
+        columns.addWidget(self.project_shelf, 2, Qt.AlignmentFlag.AlignTop)
+        blocks.addLayout(columns)
         self.resize_start_page()
         return scroll
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "start_columns"):
+        if hasattr(self, "start_outer"):
             self.resize_start_page()
 
     def resize_start_page(self):
         compact = self.width() < 1050
-        direction = QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight
-        if self.start_columns.direction() != direction:
-            self.start_columns.setDirection(direction)
         margins = (24, 20, 24, 8) if compact else (28, 32, 28, 24)
         self.start_outer.setContentsMargins(*margins)
 
     def refresh_welcome(self):
-        recent = self.workspace.recent()
-        self.recent_list.clear()
-        for path in recent[:6]:
-            item = QListWidgetItem(path.name, self.recent_list)
-            item.setData(Qt.ItemDataRole.UserRole, str(path))
-            item.setToolTip(str(path))
-        if recent:
-            visible_rows = min(self.recent_list.count(), 5)
-            row_height = self.recent_list.sizeHintForRow(0)
-            self.recent_list.setFixedHeight(visible_rows * row_height + 2 * self.recent_list.frameWidth())
-        self.recent_empty.setVisible(not recent)
-        self.recent_list.setVisible(bool(recent))
+        self.project_shelf.refresh()
         count = len(self.recovery_candidates())
         self.draft_label.setText(f"有 {count} 份未保存草稿可恢复。")
         self.draft_notice.setVisible(bool(count))
@@ -960,12 +970,14 @@ class Studio(QMainWindow):
         self.project_state.setVisible(showing_book)
         self.project_state.setText(state)
         self.search_text_action.setEnabled(self.book_started)
-        for action in (self.checkpoints_action, self.resources_action, self.web_update_action):
+        for action in (self.checkpoints_action, self.resources_action, self.web_update_action,
+                       self.check_book_action, self.show_book_action, self.book_info_action):
             action.setEnabled(self.book_started)
         ready = self.book_started and bool(self.book.chapters)
         for action in (self.replace_text_action, self.ocr_review_action, self.structure_action):
             action.setEnabled(ready)
         self.export_button.setEnabled(bool(self.book.chapters))
+        self.export_action.setEnabled(ready)
         self.screens.setCurrentWidget(self.split if showing_book else self.welcome)
 
     def show_start(self):
@@ -1617,10 +1629,47 @@ class Studio(QMainWindow):
             mobile = dialog.mobile.isChecked()
             plans = self.choose_destinations(folder, [(name, target) for target in formats])
             if plans is not None:
-                self.start_task("正在生成电子书…",
-                                lambda progress: export_book(self.book, Path(folder), name, formats, mobile,
-                                                             plans=plans, progress=progress),
-                                self.converted, reports_progress=True)
+                def start_export():
+                    book = self.book
+                    self.last_export_report = None
+                    self.export_report_button.hide()
+                    self.start_task("正在生成电子书…",
+                                    lambda progress: export_book_with_report(
+                                        book, Path(folder), name, formats, mobile, plans=plans, progress=progress,
+                                    ),
+                                    lambda result: self.exported(book, plans, result), reports_progress=True)
+
+                self.flush_current_edits(start_export)
+
+    def exported(self, book, plans, result):
+        outputs, errors, report = result
+        self.converted((outputs, errors))
+        if report is None:
+            return
+        epub = next((plan.destination for plan in plans if plan.format_name == "epub" and plan.destination in outputs),
+                    None)
+        name = epub.name if epub else book.title
+        context = (
+            "校验未通过，导出文件未写入。" if not report.valid else
+            "已检查本次导出的 EPUB 3。" if epub else
+            "已检查生成其他格式前的 EPUB 3 中间文件。"
+        )
+        self.last_export_report = book, report, name, context
+        self.export_report_button.show()
+        if not report.valid:
+            self.statusBar().showMessage("导出已取消 · " + report.summary)
+            self.show_export_report()
+        elif not errors:
+            self.statusBar().showMessage(f"已保存 {len(outputs)} 个文件 · {report.summary}")
+
+    def show_export_report(self):
+        if self.last_export_report is None:
+            return
+        book, report, name, context = self.last_export_report
+        chapters = book.chapters if book is self.book else ()
+        dialog = EpubCheckDialog(self, report, name, context=context, chapters=chapters)
+        if dialog.exec() == QDialog.DialogCode.Accepted and book is self.book and dialog.chapter_index is not None:
+            self.go_to_chapter(dialog.chapter_index)
 
     def batch_convert(self, names=None):
         if names is None or isinstance(names, bool):
@@ -1712,8 +1761,13 @@ class Studio(QMainWindow):
     def check_epub(self):
         choice, _ = QFileDialog.getOpenFileName(self, "选择要检查的 EPUB", "", "EPUB (*.epub)")
         if choice:
-            self.start_task("正在运行 EPUBCheck…", lambda: run_epubcheck(Path(choice)),
-                            lambda _: self.statusBar().showMessage("EPUBCheck 通过。"))
+            path = Path(choice)
+
+            def show_report(report):
+                self.statusBar().showMessage("EPUBCheck · " + report.summary)
+                EpubCheckDialog(self, report, path.name).exec()
+
+            self.start_task("正在运行 EPUBCheck…", lambda: inspect_epub(path), show_report)
 
     def dragEnterEvent(self, event):
         if self.task is None and any(url.isLocalFile() for url in event.mimeData().urls()):
