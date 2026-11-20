@@ -52,12 +52,12 @@ def indexed_chapters(path):
         else:
             chapter_issues.setdefault(entry['path'], issue)
     position = 0
-    for chapter in book.chapters:
+    for chapter_number, chapter in enumerate(book.chapters, 1):
         chapter_issue = chapter_issues.get(chapter.path, book_issue)
         boundaries = anchors.get(chapter.path, {})
         for section, text in readable_sections(chapter.html, boundaries):
             issue, label, fragment = section or (chapter_issue, chapter.title or '未命名章节', '')
-            yield position, chapter.path, fragment, label, issue, phrase_text(text)
+            yield position, chapter.path, fragment, label, issue, phrase_text(text), chapter_number
             position += 1
 
 
@@ -72,6 +72,7 @@ class TextHit:
     snippet: str
     size: int
     modified: int
+    chapter_number: int | None = None
 
     def current(self):
         info = self.path.stat()
@@ -98,7 +99,7 @@ class LibraryTextIndex:
                     id INTEGER PRIMARY KEY,
                     book_id INTEGER NOT NULL REFERENCES text_books(book_id) ON DELETE CASCADE,
                     position INTEGER NOT NULL, path TEXT NOT NULL, fragment TEXT NOT NULL, title TEXT NOT NULL,
-                    issue TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(book_id, position)
+                    issue TEXT NOT NULL, body TEXT NOT NULL, chapter_number INTEGER, UNIQUE(book_id, position)
                 );
                 CREATE VIRTUAL TABLE IF NOT EXISTS text_fts USING fts5(
                     body, content='text_chapters', content_rowid='id', tokenize='trigram'
@@ -111,15 +112,48 @@ class LibraryTextIndex:
                 END;
             """)
 
-    def refresh(self, progress=None, cancelled=None):
+            # Indexes created before 0.9 have one row per TOC section, so their
+            # section position cannot double as the spine's chapter number.
+            legacy_column = "SELECT 1 FROM pragma_table_info('text_chapters') WHERE name='chapter_number'"
+            if database.execute(legacy_column).fetchone() is None:
+                database.execute('BEGIN IMMEDIATE')
+                if database.execute(legacy_column).fetchone() is None:
+                    database.execute('ALTER TABLE text_chapters ADD COLUMN chapter_number INTEGER')
+
+    def _sources(self):
         with self.library._connect() as conn:
-            rows = conn.execute("""
-                SELECT books.id, books.path, t.source, t.size, t.modified
+            return conn.execute("""
+                SELECT books.id, books.path, t.source, t.size, t.modified,
+                       (SELECT c.chapter_number IS NULL FROM text_chapters c
+                        WHERE c.book_id=books.id ORDER BY c.position LIMIT 1)
                 FROM books LEFT JOIN text_books t ON t.book_id=books.id ORDER BY books.id
             """).fetchall()
+
+    def availability(self):
+        ready, unavailable = set(), []
+        for book_id, source, indexed_source, size, modified, legacy in self._sources():
+            try:
+                info = Path(source).stat()
+            except FileNotFoundError:
+                state, message = 'missing', '找不到原文件，请在桌面书库重新定位。'
+            except OSError as exc:
+                state, message = 'unreadable', str(exc)
+            else:
+                if indexed_source is None or legacy:
+                    state, message = 'unindexed', '需要建立或升级正文索引，请调用 ebook_library_index。'
+                elif source != indexed_source or (info.st_size, info.st_mtime_ns) != (size, modified):
+                    state, message = 'stale', '原文件已变化，请调用 ebook_library_index 刷新。'
+                else:
+                    ready.add(book_id)
+                    continue
+            unavailable.append(dict(source=source, state=state, message=message))
+        return ready, unavailable
+
+    def refresh(self, progress=None, cancelled=None):
+        rows = self._sources()
         updated = reused = 0
         errors = []
-        for count, (book_id, raw_path, cached_path, size, modified) in enumerate(rows, 1):
+        for count, (book_id, raw_path, cached_path, size, modified, legacy) in enumerate(rows, 1):
             if cancelled and cancelled():
                 break
             path = Path(raw_path)
@@ -128,7 +162,7 @@ class LibraryTextIndex:
             try:
                 info = path.stat()
                 stamp = (info.st_size, info.st_mtime_ns)
-                if raw_path == cached_path and stamp == (size, modified):
+                if not legacy and raw_path == cached_path and stamp == (size, modified):
                     reused += 1
                     continue
                 chapters = list(indexed_chapters(path))
@@ -142,8 +176,8 @@ class LibraryTextIndex:
                     conn.execute('DELETE FROM text_books WHERE book_id=?', (book_id,))
                     conn.execute('INSERT INTO text_books VALUES (?,?,?,?)', (book_id, raw_path, *stamp))
                     conn.executemany("""
-                        INSERT INTO text_chapters(book_id, position, path, fragment, title, issue, body)
-                        VALUES (?,?,?,?,?,?,?)
+                        INSERT INTO text_chapters(book_id, position, path, fragment, title, issue, body, chapter_number)
+                        VALUES (?,?,?,?,?,?,?,?)
                     """, ((book_id, *row) for row in chapters))
                 updated += 1
             except (*BOOK_READ_ERRORS, TypeError, AttributeError) as exc:
@@ -153,7 +187,7 @@ class LibraryTextIndex:
                 errors.append(f'{path.name} · {exc}')
         return RefreshResult(updated, reused, tuple(errors))
 
-    def find(self, query, offset=0):
+    def find(self, query, offset=0, *, limit=PAGE_SIZE, available_ids=None):
         phrase = phrase_text(query)
         if not phrase:
             return [], False
@@ -168,18 +202,22 @@ class LibraryTextIndex:
             parameter = None
         with self.library._connect() as conn:
             conn.create_function('contains_phrase', 1, lambda body: int(pattern.search(body) is not None))
+            if available_ids is not None:
+                conn.create_function('book_available', 1, available_ids.__contains__)
+                where += ' AND book_available(b.id)'
             rows = conn.execute(f"""
                 SELECT b.path, COALESCE(b.local_title,b.file_title), c.path, c.fragment, c.title,
-                       c.issue, c.body, t.size, t.modified
+                       c.issue, c.body, t.size, t.modified, c.chapter_number
                 FROM text_chapters c JOIN text_books t ON t.book_id=c.book_id
                 JOIN books b ON b.id=t.book_id AND b.path=t.source
                 WHERE {where} ORDER BY b.id,c.position LIMIT ? OFFSET ?
-            """, ([parameter] if parameter is not None else []) + [PAGE_SIZE + 1, offset]).fetchall()
+            """, ([parameter] if parameter is not None else []) + [limit + 1, offset]).fetchall()
         hits = []
-        for path, title, chapter, fragment, label, issue, body, size, modified in rows[:PAGE_SIZE]:
+        for path, title, chapter, fragment, label, issue, body, size, modified, chapter_number in rows[:limit]:
             match = pattern.search(body)
             if match:
                 start, end = max(0, match.start()-30), min(len(body), match.end()+30)
                 snippet = ('…' if start else '') + body[start:end] + ('…' if end < len(body) else '')
-                hits.append(TextHit(Path(path), title, chapter, fragment, label, issue, snippet, size, modified))
-        return hits, len(rows) > PAGE_SIZE
+                hits.append(TextHit(Path(path), title, chapter, fragment, label, issue, snippet, size, modified,
+                                    chapter_number))
+        return hits, len(rows) > limit

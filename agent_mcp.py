@@ -8,7 +8,7 @@ import sys
 
 
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2024-11-05")
-SERVER_VERSION = "0.8.0"
+SERVER_VERSION = "0.9.0"
 GUIDE_TOOL = "ebook_guide"
 WORKFLOW_INSTRUCTIONS = (
     "用 ebook_status 检查本机工具。常规单栏扫描件用 xiaomi（Xiaomi-OCR-0 Q8），"
@@ -18,6 +18,7 @@ WORKFLOW_INSTRUCTIONS = (
     "最后用 ebook_check（EPUBCheck）核验并报告结果。"
     "校对用 ebook_rule_groups 找规则组，ebook_proofread 先预览再将校订稿另存为新工程。"
     "用 ebook_compare 比较两份 EPUB，按 next_offset 继续读取差异。"
+    "按正文找书用 ebook_library_search；用 ebook_library_index 登记指定书籍或刷新索引。"
     f"调用 {GUIDE_TOOL} 读取完整指南。"
 )
 
@@ -51,7 +52,7 @@ class _Session:
             )
         self.tools = [*tools.values(), {
             "name": GUIDE_TOOL,
-            "description": "读取电子书工作台操作指南。含 OCR 选型、顺序校对、两份 EPUB 对比、导出和 EPUBCheck 示例。",
+            "description": "读取电子书工作台操作指南。含跨书检索、OCR 选型、顺序校对、EPUB 对比、导出和校验示例。",
             "inputSchema": {"type": "object", "additionalProperties": False},
         }]
         self.version = None
@@ -96,7 +97,7 @@ class _Session:
             server_info = {"name": "ebook-studio", "version": SERVER_VERSION}
             if self.version == "2025-11-25":
                 server_info["description"] = (
-                    f"本地电子书工作台。扫描件、网页、书稿校对、EPUB 导出与比较。调用 {GUIDE_TOOL} 查看指南。"
+                    f"本地电子书工作台。书库全文检索、OCR、网页采集、书稿校对、EPUB 导出与比较。调用 {GUIDE_TOOL} 查看指南。"
                 )
             return {
                 "protocolVersion": self.version,

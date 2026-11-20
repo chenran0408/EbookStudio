@@ -23,7 +23,7 @@ class BookReplacementTests(unittest.TestCase):
 
         plan = preview_replacement(book, "河流", "<溪流 & 山谷>", preview_limit=1)
 
-        self.assertEqual((plan.matches, plan.replacements, len(plan.chapters)), (2, 2, 2))
+        self.assertEqual((plan.matches, plan.replacements, len(plan.chapters)), (3, 3, 2))
         self.assertEqual([hit.chapter_title for hit in plan.hits], ["第一章"])
         self.assertIn("A&B 【河流】", plan.hits[0].before)
         self.assertIn("A&B 【<溪流 & 山谷>】", plan.hits[0].after)
@@ -31,7 +31,8 @@ class BookReplacementTests(unittest.TestCase):
         plan.apply(book)
         self.assertEqual(
             book.chapters[0].html,
-            original.replace("A&amp;B 河流</x:p>", "A&amp;B &lt;溪流 &amp; 山谷&gt;</x:p>"),
+            original.replace("A&amp;B 河流</x:p>", "A&amp;B &lt;溪流 &amp; 山谷&gt;</x:p>")
+            .replace("河<x:em>流", "&lt;<x:em>溪流 &amp; 山谷&gt;"),
         )
         self.assertEqual(book.chapters[1].html, "<p>另一条&lt;溪流 &amp; 山谷&gt;</p>")
 

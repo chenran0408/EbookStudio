@@ -56,7 +56,7 @@ class BookReplaceDialog(QDialog):
         layout.setContentsMargins(20, 18, 20, 16)
         layout.setSpacing(9)
         layout.addWidget(QLabel("替换正文", objectName="section"))
-        layout.addWidget(_status("格式标签会分隔可匹配的文字。将替换文字留空可删除匹配内容。"))
+        layout.addWidget(_status("可在同一段内跨粗体、斜体或链接查找。将替换文字留空可删除选中的内容。"))
 
         form = QFormLayout()
         rule_row = QHBoxLayout()

@@ -4,7 +4,7 @@
 
 MCP 服务器在初始化时会提供简要操作说明。需要完整示例时，可以让 Agent 调用 `ebook_guide`，传入空对象 `{}`，即可取得 Markdown 指南。项目里的 `AGENTS.md` 是可选的，可用来补充自己的要求。升级工作台后，如果旧会话里还看不到新工具，重新连接 MCP 或新建会话。
 
-v0.8.0 提供 14 个 MCP 工具。更新后调用 `ebook_status`，确认返回的 `version` 是 `0.8.0`，并在工具列表中核对 `ebook_rule_groups`、`ebook_proofread` 和 `ebook_compare`。如果新版解压到其他文件夹，请将客户端配置中的 command 更新为新 EXE 的路径，重新连接后再查看列表。
+v0.9.0 提供 16 个 MCP 工具。更新后调用 `ebook_status`，确认返回的 `version` 是 `0.9.0`，并在工具列表中核对新增的 `ebook_library_search` 和 `ebook_library_index`。如果新版解压到其他文件夹，请将客户端配置中的 command 更新为新 EXE 的路径，重新连接后再查看列表。
 
 ## 在 Codex 中使用
 
@@ -68,10 +68,18 @@ $agent = 'C:\Apps\EbookStudio\EbookStudio-Agent.exe'
 
 OCR 模型和 EPUBCheck 需按随包使用说明安装。环境变量也可设置为 Windows 用户环境变量，保存后重启客户端。先让 Agent 用已就绪的模型试识别一页，检查文字和页序，再提交多页任务。
 
+## 凭一句话找书
+
+> 在我的书库里查“月光落在屋后的石阶上”。告诉我在哪本书、哪一期、哪一章，并摘出上下文。
+
+Agent 可直接用 `ebook_library_search` 查询桌面书库。第一次使用时，可以指定需要纳入的文件，例如“把 C:/Books/月刊合订本.epub 加入我的书库，再查一次”。Agent 会调用 `ebook_library_index` 登记该文件并更新正文索引。桌面编辑过的书名、作者和标签会保留。书稿改动后可直接让 Agent 刷新书库。
+
 ## 把校对或版本对比交给 Agent
 
 > 读取我的本机规则组「杂志署名校对」，在扫描稿.bookproj 上预览。告诉我每一步实际改几处，并给出修改前后的文字。我确认后，将校订稿另存为新的工程并导出 EPUB，最后运行 EPUBCheck。
 
 > 比较我提供的原版和修订版 EPUB，按类别列出变化，指出改过正文的章节，并给出前后文。请检查所有结果页。
+
+OCR 文字有时会被粗体、斜体或链接拆开。可以把同一段里的完整词句交给 Agent 校对，原有格式标签和链接地址会保留。
 
 规则组来自与桌面共用的本机工作区。如果客户端使用自定义目录，可在 MCP 环境变量中填写与桌面一致的 `EBOOK_STUDIO_WORKSPACE`。`ebook_guide` 中有可直接调用的参数示例。

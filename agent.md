@@ -6,7 +6,7 @@
 
 ## 开始前
 
-- 用 ebook_status 传入空对象，查看 version、actions、output_formats，以及各本机工具的 tools.<名称>.ready 和 message。本版 version 为 0.8.0，与初始化结果的 serverInfo.version 相同。按任务需要确认相应 OCR 或转换工具可用，遇到缺失时把具体原因告诉用户。
+- 用 ebook_status 传入空对象，查看 version、actions、output_formats，以及各本机工具的 tools.<名称>.ready 和 message。本版 version 为 0.9.0，与初始化结果的 serverInfo.version 相同。按任务需要确认相应 OCR 或转换工具可用，遇到缺失时把具体原因告诉用户。
 - OCR 模型和可选工具按需单独配置。可在 Windows 用户环境变量或 MCP 服务的 `env` 中指定路径。转换器使用 `EBOOK_STUDIO_PANDOC` 与 `EBOOK_STUDIO_CALIBRE`。Paddle 使用 `EBOOK_STUDIO_PADDLE_PYTHON` 与 `EBOOK_STUDIO_PADDLE_MODELS`。小米可用 `EBOOK_STUDIO_OCR_MODEL` 指定已安装的 Ollama 模型标签。
 - 用绝对路径指定输入和输出，输出目录应已存在。把每个新文件保存到明确的 output 路径。保留输入文件。只在用户明确要求覆盖某个已有输出时传 overwrite: true，输入路径仍应与输出路径不同。
 - .bookproj 用于继续编辑。EPUB 用于在阅读器中阅读。需要交付两者时，先保存可编辑工程，再从工程导出 EPUB。
@@ -17,6 +17,8 @@
 | --- | --- | --- |
 | ebook_guide | 无 | 返回本指南。 |
 | ebook_status | 无 | 无 |
+| ebook_library_search | query | 在已建索引的书中查一句正文。offset 从 0 开始，limit 默认为 20，范围 1–100。 |
+| ebook_library_index | 无 | 传 sources 登记明确指定的 EPUB 或 .bookproj，再刷新索引。传空对象只刷新已有书库。 |
 | ebook_inspect | source | chapter 从 1 开始。读取章节时可加 include_html 和 max_chars，字符上限默认 12000，最多 50000。 |
 | ebook_create | chapters、output | title、author、language、overwrite。 |
 | ebook_update | source、output，并至少提供一项修改 | metadata、replace_chapters、append_chapters、overwrite。 |
@@ -34,6 +36,13 @@ metadata 支持 title、author、language。新章节包含 title 和 html，可
 
 ## 按任务执行
 
+### 记得一句正文，想找出处
+
+1. 向 `ebook_library_search` 传入 `{"query":"月光落在屋后的石阶上","limit":10}`。GUI 与 Agent 共用同一用户的桌面书库。自定义工作区时两者需使用相同的 `EBOOK_STUDIO_WORKSPACE`。
+2. 如果书库为空且用户已指定书籍，向 `ebook_library_index` 传 `{"sources":["C:/Books/月刊合订本.epub","C:/Books/采访稿.bookproj"]}`。查看 `import_errors` 和 `index_errors` 后再查。已登记文件如果显示 `unindexed` 或 `stale`，传 `{}` 刷新索引即可。原书失联时请在桌面书库重新定位文件。
+3. 每个命中片段返回书名、期号、章节号、目录标题、原文件路径、书内路径、锚点和前后文。未知期号或无锚点时相应字段为空字符串。继续阅读命中章节时，将该项的 `source` 和从 1 开始的 `chapter` 传给 `ebook_inspect`。
+4. 将 `next_offset` 作为下一次查询的 `offset`，直到返回 null。同一目录片段多次命中只显示第一处上下文。如果 `unavailable` 包含条目，报告检索范围时说明这些文件及原因。
+
 ### 校对一份 OCR 工程
 
 1. 调用 `ebook_rule_groups` 并传 `{}`，读取本机已保存的名称和步骤数。传 `{"name":"杂志署名校对"}` 可以检查指定组的步骤。桌面与 MCP 使用同一 Windows 用户的工作区；若使用自定义工作区，请为两者设置相同的 `EBOOK_STUDIO_WORKSPACE`。
@@ -49,7 +58,7 @@ metadata 支持 title、author、language。新章节包含 title 和 html，可
 }
 ~~~
 
-3. 核对 `stages` 中每一步的 `matches`、`replacements` 和 `examples`。每一步都会读取上一步修改后的正文。`changed_chapters` 是最终改变的章数，两条规则可能依次修改同一处文字。预览只读取书稿。
+3. 核对 `stages` 中每一步的 `matches`、`replacements` 和 `examples`。同一段里的词即使分别位于普通、粗体、斜体或链接文字中，也可以一起匹配。替换会保留这些标签和链接目标。段落、换行或表格单元格会分隔匹配范围。每一步都会读取上一步修改后的正文。`changed_chapters` 是最终改变的章数，两条规则可能依次修改同一处文字。预览只读取书稿。
 4. 按用户要求应用时，再次调用 `ebook_proofread`，沿用刚才的 source 和 group 或 steps，增加 `"mode":"apply"`、`"preview_id":"上一步返回的完整值"`、`"output":"C:/Books/署名校订稿.bookproj"`。原件或规则变化时重新预览。从新工程调用 `ebook_export` 并用 `ebook_check` 检验导出的文件。
 
 ### 比较原版和修订版

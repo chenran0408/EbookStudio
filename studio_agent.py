@@ -69,6 +69,18 @@ def _action(description: str, schema: dict) -> dict:
 
 ACTIONS = {
     "status": _action("Inspect installed local converters and OCR engines.", _object({})),
+    "library_index": _action(
+        "Refresh the desktop library's full-text index. Optionally register only the specified EPUB or project files.",
+        _object({"sources": _array(_SOURCE, "Explicit EPUB or .bookproj paths to add to the local library.")}),
+    ),
+    "library_search": _action(
+        "Find a literal phrase in indexed library books. Return book, issue, chapter, anchor, excerpt and index status.",
+        _object({
+            "query": _string("A literal phrase from the book body.", minLength=1),
+            "offset": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807, "default": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+        }, "query"),
+    ),
     "inspect": _action(
         "Read project or EPUB metadata and chapter headings. Request one chapter to see its text.",
         _object({
@@ -337,6 +349,55 @@ def _inspect(args: dict) -> dict:
     return answer
 
 
+def _library_index(args: dict) -> dict:
+    from book_library import BookLibrary
+    from book_library_text import LibraryTextIndex
+    from workspace import _default_directory
+
+    workspace = _default_directory()
+    workspace.mkdir(parents=True, exist_ok=True)
+    library = BookLibrary(workspace)
+    imported = library.add(Path(path).expanduser() for path in args.get("sources", []))
+    refreshed = LibraryTextIndex(library).refresh()
+    return {
+        "added": imported.added, "refreshed_metadata": imported.refreshed,
+        "import_errors": [{"source": str(path), "message": reason} for path, reason in imported.errors],
+        "updated": refreshed.updated, "reused": refreshed.reused, "index_errors": list(refreshed.errors),
+    }
+
+
+def _library_search(args: dict) -> dict:
+    from book_library import BookLibrary
+    from book_library_text import LibraryTextIndex
+    from workspace import _default_directory
+
+    workspace = _default_directory()
+    offset, limit = args.get("offset", 0), args.get("limit", 20)
+    hits, unavailable, ready, more = [], [], set(), False
+    if (workspace / "library.sqlite3").exists():
+        index = LibraryTextIndex(BookLibrary(workspace))
+        ready, unavailable = index.availability()
+        if ready:
+            hits, more = index.find(args["query"], offset, limit=limit, available_ids=ready)
+    if not (ready or unavailable):
+        message = "书库为空。用 ebook_library_index 的 sources 登记指定的 EPUB 或 .bookproj。"
+    elif not ready:
+        message = "当前没有可搜索的书。请按 unavailable 中的提示处理。"
+    elif hits:
+        message = f"本页命中 {len(hits)} 个目录片段。"
+    else:
+        message = "当前页没有匹配的正文。"
+    return {
+        "catalog_books": len(ready) + len(unavailable), "searchable_books": len(ready),
+        "unavailable": unavailable, "message": message,
+        "hits": [{"source": str(hit.path), "book_title": hit.book_title, "issue": hit.issue,
+                  "chapter": hit.chapter_number, "chapter_title": hit.chapter_title,
+                  "chapter_path": hit.chapter_path, "fragment": hit.fragment, "snippet": hit.snippet}
+                 for hit in hits],
+        "next_offset": offset + limit if more else None,
+    }
+
+
 def _create(args: dict) -> dict:
     destination = _project_output(args)
     book = Book(chapters=[_make_chapter(chapter) for chapter in args["chapters"]])
@@ -469,6 +530,7 @@ def _compare(args: dict) -> dict:
 
 _HANDLERS = {
     "status": _status, "inspect": _inspect, "create": _create, "update": _update,
+    "library_index": _library_index, "library_search": _library_search,
     "discover": _discover, "capture": _capture, "ocr": _ocr, "export": _export, "convert": _convert, "check": _check,
     "rule_groups": _rule_groups, "proofread": _proofread, "compare": _compare,
 }
