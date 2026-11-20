@@ -1,0 +1,44 @@
+name: Upload verified v0.8.0 Windows ZIP
+on:
+  push:
+    branches: [publish/verified-v0.8.0-6a9aecc1]
+permissions:
+  contents: write
+jobs:
+  upload:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14.0'
+          architecture: x64
+      - name: Restore tested archive, verify SHA-256 and send to draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: chenran0408/EbookStudio
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          Set-Location -LiteralPath $env:RUNNER_TEMP
+          $base = 'EbookStudio-v0.7.0-Windows-x64.zip'
+          $target = 'EbookStudio-v0.8.0-Windows-x64.zip'
+          gh release download v0.7.0 --pattern $base
+          if ((Get-FileHash -LiteralPath $base).Hash -ne '0fdcc7fac1d6d53bf3856452bf0d9e2b996ef87b6dd5156c3db7f76f7610ff12') {
+              throw 'Previous release differs'
+          }
+          python "$env:GITHUB_WORKSPACE/transfer/restore.py" $base "$env:GITHUB_WORKSPACE/transfer/update.delta" $target
+          if ((Get-FileHash -LiteralPath $target).Hash -ne '6a9aecc194c929fe7a845eff9b7c3c4f1cacf3d8c6d97493eb91b896c815ad4e') {
+              throw 'Restored ZIP differs from the local tested package'
+          }
+          $assets = gh release view v0.8.0 --json isDraft,assets | ConvertFrom-Json
+          if (-not $assets.isDraft) { throw 'Target release must be a draft' }
+          if ($target -notin $assets.assets.name) {
+              gh release upload v0.8.0 $target
+          }
+
+
