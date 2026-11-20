@@ -40,6 +40,7 @@ from book_structure_dialog import show_book_structure
 from book_typography import DEFAULT_STYLE_PATH, FONT_TYPES, decode_stylesheet
 from book_typography_dialog import show_typography
 from ebook_core import Asset, Book, Chapter, asset_href, resolve_href
+from epub_compare_dialog import show_epub_compare
 from epub_validation_dialog import EpubCheckDialog
 from first_book import first_book
 from file_drops import FileDrops
@@ -54,6 +55,7 @@ from ocr_batch_dialog import OcrBatchDialog
 from ocr_import import IMAGE_TYPES as SCAN_IMAGE_TYPES
 from ocr_review import show_ocr_review
 from project_shelf import ProjectShelf
+from rule_group_dialog import show_rule_groups
 from studio_dialogs import ExportDialog, ScanDialog
 from studio_operations import (
     LABELS, capture_pages, comic_pages, convert_files, export_book_with_report, inspect_epub, read_book, safe_name,
@@ -747,9 +749,13 @@ class Studio(QMainWindow):
         self.check_book_action = revision_menu.addAction("检查书稿…", self.check_book_quality)
         self.replace_text_action = revision_menu.addAction("整书查找替换…", lambda: show_book_replace(self))
         self.replace_text_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
+        self.rule_groups_action = revision_menu.addAction("顺序校对规则组…", lambda: show_rule_groups(self))
+        self.rule_groups_action.setProperty("commandKeywords", "OCR 批量 替换 顺序 组合 纠错")
         self.spelling_action = revision_menu.addAction("拼写检查与个人词典…", lambda: show_spelling(self))
         self.spelling_action.setProperty("commandKeywords", "拼写 字典 词典 OCR 错词 专名")
         self.checkpoints_action = revision_menu.addAction("检查点…", lambda: show_book_checkpoints(self))
+        compare_action = revision_menu.addAction("比较两份 EPUB…", lambda: show_epub_compare(self))
+        compare_action.setProperty("commandKeywords", "电子书 对比 差异 原版 修订版 版本")
         self.ocr_review_action = revision_menu.addAction("OCR 原图对照…", self.review_current_scan)
         view_menu = self.menuBar().addMenu("视图")
         view_menu.addAction("开始页", self.show_start)
@@ -1032,7 +1038,7 @@ class Studio(QMainWindow):
                        self.check_book_action, self.show_book_action, self.book_info_action):
             action.setEnabled(self.book_started)
         ready = self.book_started and bool(self.book.chapters)
-        for action in (self.replace_text_action, self.ocr_review_action, self.structure_action,
+        for action in (self.replace_text_action, self.rule_groups_action, self.ocr_review_action, self.structure_action,
                        self.inline_toc_action, self.spelling_action):
             action.setEnabled(ready)
         self.export_button.setEnabled(bool(self.book.chapters))

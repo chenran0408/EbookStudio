@@ -1,29 +1,34 @@
 """Browse checkpoint differences without applying them."""
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QTextCursor, QTextFormat
+from PySide6.QtGui import QColor, QPixmap, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QLabel, QPlainTextEdit,
-    QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QSizePolicy, QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from checkpoint_compare import excerpts
 
 
 class CheckpointCompareDialog(QDialog):
-    def __init__(self, parent, label, changes):
+    def __init__(self, parent, label, changes, *, files=None):
         super().__init__(parent)
-        self.setWindowTitle("与当前书稿比较")
+        self.setWindowTitle("EPUB 对比结果" if files else "与当前书稿比较")
         self.resize(850, 590)
         self.changes = changes
         layout = QVBoxLayout(self)
         summary = QLabel()
         summary.setTextFormat(Qt.TextFormat.PlainText)
         summary.setWordWrap(True)
-        summary.setText(f"「{label}」与当前书稿有 {len(changes)} 项变化。"
-                        if changes else f"「{label}」与当前书稿的资料、章节、目录和资源一致。")
+        if files:
+            message = f"共 {len(changes)} 项变化。" if changes else "两版的书籍资料、章节、目录和资源一致。"
+            summary.setText(f"{message}\n原版　{files[0]}\n修订版　{files[1]}")
+            summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        else:
+            summary.setText(f"「{label}」与当前书稿有 {len(changes)} 项变化。"
+                            if changes else f"「{label}」与当前书稿的资料、章节、目录和资源一致。")
         layout.addWidget(summary)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.button(QDialogButtonBox.StandardButton.Close).setText("返回检查点")
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭" if files else "返回检查点")
         buttons.rejected.connect(self.reject)
         if not changes:
             self.resize(500, 150)
@@ -46,7 +51,8 @@ class CheckpointCompareDialog(QDialog):
         self.markup.toggled.connect(self.display)
         split = QSplitter(Qt.Orientation.Horizontal)
         self.panes = []
-        for heading in ("检查点版本", "当前书稿"):
+        self.images = []
+        for heading in (("原版", "修订版") if files else ("检查点版本", "当前书稿")):
             column = QWidget()
             group = QVBoxLayout(column)
             group.setContentsMargins(0, 0, 0, 0)
@@ -56,6 +62,13 @@ class CheckpointCompareDialog(QDialog):
             editor.setReadOnly(True)
             title.setBuddy(editor)
             group.addWidget(title)
+            if files:
+                image = QLabel()
+                image.setAccessibleName(heading + "图片预览")
+                image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                image.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                group.addWidget(image)
+                self.images.append(image)
             group.addWidget(editor)
             self.panes.append(editor)
             split.addWidget(column)
@@ -73,6 +86,23 @@ class CheckpointCompareDialog(QDialog):
         self.markup.blockSignals(True)
         self.markup.setChecked(change.source is not None and change.before == change.after)
         self.markup.blockSignals(False)
+        for side, image in enumerate(self.images):
+            image.clear()
+            image.setVisible(change.images is not None)
+            if change.images is None:
+                continue
+            asset = change.images[side]
+            pixmap = QPixmap()
+            raster = {"image/png": "PNG", "image/jpeg": "JPEG", "image/gif": "GIF", "image/webp": "WEBP"}
+            if asset is None:
+                image.setText("此版本没有这项资源")
+            elif asset.media_type in raster and pixmap.loadFromData(asset.data, raster[asset.media_type]):
+                if pixmap.width() > 320 or pixmap.height() > 150:
+                    pixmap = pixmap.scaled(320, 150, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
+                image.setPixmap(pixmap)
+            else:
+                image.setText("可在下方查看文件信息")
         self.display()
 
     def display(self):
