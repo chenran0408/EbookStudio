@@ -1,10 +1,11 @@
 """Build a sequence of correction rules and review each step before applying it."""
 import re
+from pathlib import Path
 from threading import Event
 
 from PySide6.QtCore import QObject, QSignalBlocker, QThreadPool, Qt, Signal, Slot
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QMessageBox, QPushButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
@@ -13,7 +14,8 @@ from book_replace import PREVIEW_LIMIT
 from book_revision_dialogs import _field, _status
 from ebook_core import Book
 from replacement_rules import Rule, SavedRules
-from rule_groups import SavedGroups, Step, apply_rule_group, preview_rule, preview_rule_group
+from rule_groups import SavedGroups, Step, apply_rule_group, export_group, preview_rule, preview_rule_group, read_group_file
+from studio_operations import safe_name
 
 
 class StepDialog(QDialog):
@@ -117,6 +119,8 @@ class RuleGroupDialog(QDialog):
 
         self.save = button(picker, "保存规则组…", self.save_group)
         self.delete = button(picker, "删除规则组…", self.delete_group)
+        button(picker, "导入规则组…", self.import_group)
+        self.export_button = button(picker, "导出规则组…", self.export_current)
         self.order = QTreeWidget()
         self.order.setAccessibleName("规则执行顺序")
         self.order.setHeaderLabels(["步骤", "查找", "替换为", "命中", "替换次数"])
@@ -224,6 +228,45 @@ class RuleGroupDialog(QDialog):
             self.steps.clear()
             self.changed(0)
 
+    def export_current(self):
+        filename, _ = QFileDialog.getSaveFileName(self, "导出校对规则组", safe_name(self.loaded or "校对规则组") + ".json",
+                                                  "规则组文件 (*.json)")
+        if not filename:
+            return
+        path = Path(filename)
+        try:
+            if path.resolve() in (self.groups.path.resolve(), self.presets.path.resolve()):
+                raise ValueError("请选择新的分享文件，本机规则库需保留。")
+            export_group(path, self.loaded or path.stem, self.steps)
+        except (OSError, ValueError) as exc:
+            self.summary.setText(f"无法导出规则组。{exc}")
+            return
+        self.summary.setText(f"已导出 {len(self.steps)} 个步骤到 {path}。")
+
+    def import_group(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "导入校对规则组", "", "规则组文件 (*.json)")
+        if not filename:
+            return
+        try:
+            name, steps = read_group_file(Path(filename))
+        except (OSError, ValueError) as exc:
+            self.summary.setText(f"无法导入规则组。{exc}")
+            return
+        if name in self.saved:
+            name, ok = QInputDialog.getText(self, "已存在同名规则组", "输入新名称另存，或保留原名以替换现有规则组。", text=name)
+            if not ok:
+                return
+            name = name.strip()
+            if name in self.saved and not self.confirm("替换规则组", f"将本机「{name}」替换为文件中的 {len(steps)} 个步骤？"):
+                return
+        if tuple(self.steps) != self.saved.get(self.loaded, ()) and not self.confirm(
+                "切换规则组", "放弃当前尚未保存的步骤和顺序，打开导入的规则组？"):
+            return
+        if self.store(name, steps):
+            self.steps = list(steps)
+            self.changed(0)
+            self.summary.setText(f"已导入「{name}」的 {len(steps)} 个步骤。点「预览整组」核对本书的改动。")
+
     def index(self):
         return self.order.indexOfTopLevelItem(self.order.currentItem())
 
@@ -284,6 +327,7 @@ class RuleGroupDialog(QDialog):
             if self.steps:
                 self.order.setCurrentItem(self.order.topLevelItem(row))
         self.save.setEnabled(bool(self.steps))
+        self.export_button.setEnabled(bool(self.steps))
         self.preview.setEnabled(bool(self.steps))
         self.apply_button.setEnabled(False)
         self.summary.setText("点「添加步骤」写下第一个改法，或从上方选择已有规则组。"

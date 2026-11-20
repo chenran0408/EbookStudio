@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import BinaryIO
 from urllib.parse import quote, unquote, urlsplit
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -145,7 +146,7 @@ class Book:
                 project.writestr(f'original/{archive_path(name)}', original)
 
     @classmethod
-    def load(cls, path: str | Path) -> Book:
+    def load(cls, path: str | Path | BinaryIO) -> Book:
         with ZipFile(path) as project:
             data = json.loads(project.read('project.json'))
             if data.get('version') != 1:

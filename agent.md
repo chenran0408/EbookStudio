@@ -6,7 +6,7 @@
 
 ## 开始前
 
-- 用 ebook_status 传入空对象，查看 actions、output_formats，以及各本机工具的 tools.<名称>.ready 和 message。按任务需要确认相应 OCR 或转换工具可用，遇到缺失时把具体原因告诉用户。
+- 用 ebook_status 传入空对象，查看 version、actions、output_formats，以及各本机工具的 tools.<名称>.ready 和 message。本版 version 为 0.8.0，与初始化结果的 serverInfo.version 相同。按任务需要确认相应 OCR 或转换工具可用，遇到缺失时把具体原因告诉用户。
 - OCR 模型和可选工具按需单独配置。可在 Windows 用户环境变量或 MCP 服务的 `env` 中指定路径。转换器使用 `EBOOK_STUDIO_PANDOC` 与 `EBOOK_STUDIO_CALIBRE`。Paddle 使用 `EBOOK_STUDIO_PADDLE_PYTHON` 与 `EBOOK_STUDIO_PADDLE_MODELS`。小米可用 `EBOOK_STUDIO_OCR_MODEL` 指定已安装的 Ollama 模型标签。
 - 用绝对路径指定输入和输出，输出目录应已存在。把每个新文件保存到明确的 output 路径。保留输入文件。只在用户明确要求覆盖某个已有输出时传 overwrite: true，输入路径仍应与输出路径不同。
 - .bookproj 用于继续编辑。EPUB 用于在阅读器中阅读。需要交付两者时，先保存可编辑工程，再从工程导出 EPUB。
@@ -26,10 +26,35 @@
 | ebook_export | source、output | format、mobile、overwrite。format 默认从输出扩展名推断，epub 对应 EPUB 3，epub2 对应 EPUB 2 并仍使用 .epub。mobile 默认 true，优化可重排书籍中的 JPEG 和 PNG 正文图。封面和固定版式书籍保留原图。 |
 | ebook_convert | source、output | format、overwrite。适用于已有文件的直接格式转换。 |
 | ebook_check | source | 无。source 指向导出的 .epub。 |
+| ebook_rule_groups | 无 | 省略参数列出桌面保存的规则组及步骤数；传 name 读取该组的完整步骤。 |
+| ebook_proofread | source，以及 group 或 steps 其中一项 | mode 默认为 preview。apply 还需要 preview_id 和 output。example_limit 控制每步示例数，默认 3，范围 0–20。overwrite 用于确认覆盖已存在的输出。 |
+| ebook_compare | original、revision | 比较两份 EPUB。offset 从 0 开始，limit 默认 20（1–100），max_chars 默认 600（每侧 1–4000 字符）。 |
 
 metadata 支持 title、author、language。新章节包含 title 和 html，可加 level 和 source。html 填章节正文片段，level 从 1 开始，source 可记录原始网页 URL。replace_chapters 的每项含 chapter 编号和需要修改的字段。ebook_inspect、ebook_update 和 ebook_export 的 source 可使用 .bookproj 或 .epub。
 
 ## 按任务执行
+
+### 校对一份 OCR 工程
+
+1. 调用 `ebook_rule_groups` 并传 `{}`，读取本机已保存的名称和步骤数。传 `{"name":"杂志署名校对"}` 可以检查指定组的步骤。桌面与 MCP 使用同一 Windows 用户的工作区；若使用自定义工作区，请为两者设置相同的 `EBOOK_STUDIO_WORKSPACE`。
+2. 用 `ebook_proofread` 预览。按名称选组时传 `{"source":"C:/Books/扫描稿.bookproj","group":"杂志署名校对"}`。用户给出具体改法时，也可以传显式步骤，如下所示。保留有意义的空格，`regular` 和 `case_sensitive` 默认均为 false。
+
+~~~json
+{
+  "source": "C:/Books/扫描稿.bookproj",
+  "steps": [
+    {"name": "署名斜杠转全角", "query": " / ", "replacement": " ／ "},
+    {"name": "清理斜杠两侧空格", "query": " ／ ", "replacement": "／"}
+  ]
+}
+~~~
+
+3. 核对 `stages` 中每一步的 `matches`、`replacements` 和 `examples`。每一步都会读取上一步修改后的正文。`changed_chapters` 是最终改变的章数，两条规则可能依次修改同一处文字。预览只读取书稿。
+4. 按用户要求应用时，再次调用 `ebook_proofread`，沿用刚才的 source 和 group 或 steps，增加 `"mode":"apply"`、`"preview_id":"上一步返回的完整值"`、`"output":"C:/Books/署名校订稿.bookproj"`。原件或规则变化时重新预览。从新工程调用 `ebook_export` 并用 `ebook_check` 检验导出的文件。
+
+### 比较原版和修订版
+
+向 `ebook_compare` 传入 `{"original":"C:/Books/原版.epub","revision":"C:/Books/修订版.epub","limit":10}`。两份书可以来自不同编辑器。`counts` 汇总各类差异，`changes` 给出类别、章名或资源名、书内路径和两侧摘录。版式变化可返回 XHTML 摘录；图片资源提供文件信息和 SHA-256。摘录超长时查看 `before_truncated`、`after_truncated`，必要时增大 max_chars。把返回的 `next_offset` 作为下一次调用的 offset，直到其为 null。向用户报告完整差异数时使用 `total`。
 
 ### 扫描件制书
 

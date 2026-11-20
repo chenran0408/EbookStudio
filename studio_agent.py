@@ -54,6 +54,13 @@ _SOURCE = _string("Path to an existing local input file.", minLength=1)
 _PROJECT = _string("Output .bookproj path in an existing directory.", minLength=1)
 _OUTPUT = _string("Output file path with target extension in an existing directory.", minLength=1)
 _OVERWRITE = _boolean("Replace an existing output file only. Input files are always protected.")
+_STEP = _object({
+    "name": _string("Optional step label; the desktop may use the literal search text as its label."),
+    "query": _string("Text or regular expression. Keep meaningful spaces."),
+    "replacement": _string("Replacement text. Empty deletes the match."),
+    "regular": _boolean("Use a regular expression with capture groups."),
+    "case_sensitive": _boolean("Match letter case."),
+}, "query", "replacement")
 
 
 def _action(description: str, schema: dict) -> dict:
@@ -143,6 +150,35 @@ ACTIONS = {
     "check": _action(
         "Run local EPUBCheck on an existing EPUB and return the validation report.",
         _object({"source": _SOURCE}, "source"),
+    ),
+    "rule_groups": _action(
+        "List the desktop's saved proofreading groups, or read one group's ordered steps by name.",
+        _object({"name": _string("Exact saved group name.", minLength=1)}),
+    ),
+    "proofread": _action(
+        "Preview ordered proofreading rules on EPUB or .bookproj. Apply the reviewed preview to a separate .bookproj.",
+        _object({
+            "source": _SOURCE,
+            "group": _string("Saved desktop group name. Supply exactly one of group or steps.", minLength=1),
+            "steps": _array(_STEP, "Explicit steps in execution order. Supply exactly one of steps or group."),
+            "mode": _string("Preview reads the source. Apply also requires output and preview_id.",
+                            enum=["preview", "apply"], default="preview"),
+            "preview_id": _string("For apply, the preview_id returned for this input and these steps.", minLength=1),
+            "output": _PROJECT, "overwrite": _OVERWRITE,
+            "example_limit": {"type": "integer", "minimum": 0, "maximum": 20, "default": 3,
+                              "description": "Maximum before/after examples for each step."},
+        }, "source"),
+    ),
+    "compare": _action(
+        "Compare two local EPUB files read-only. Return category counts and paginated before/after excerpts.",
+        _object({
+            "original": _string("Original EPUB path (left).", minLength=1),
+            "revision": _string("Revised EPUB path (right).", minLength=1),
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+            "max_chars": {"type": "integer", "minimum": 1, "maximum": 4000, "default": 600,
+                          "description": "Maximum characters in each side of each change."},
+        }, "original", "revision"),
     ),
 }
 
@@ -263,7 +299,10 @@ def _progress(done: int, total: int, message: str) -> None:
 
 
 def _status(_args: dict) -> dict:
+    from agent_mcp import SERVER_VERSION
+
     return {
+        "version": SERVER_VERSION,
         "tools": {name: asdict(info) for name, info in {**converter_readiness(), **ocr_readiness()}.items()},
         "actions": list(ACTIONS),
         "output_formats": sorted(set(conversion.OUTPUT_FORMATS) | {"epub2"}),
@@ -401,9 +440,37 @@ def _check(args: dict) -> dict:
     return {"source": str(source), "valid": True, "report": run_epubcheck(source)}
 
 
+def _rule_groups(args: dict) -> dict:
+    from agent_revision import rule_groups
+    return rule_groups(args)
+
+
+def _proofread(args: dict) -> dict:
+    from agent_revision import proofread
+
+    source = _source(args["source"], book_only=True)
+    destination = None
+    if args.get("mode", "preview") == "apply":
+        if "preview_id" not in args or "output" not in args:
+            raise ValueError("应用校对需要先预览，再提供 preview_id 和新的 output 工程路径。")
+        destination = _project_output(args, source)
+    elif args.keys() & {"output", "preview_id", "overwrite"}:
+        raise ValueError("output、overwrite 和 preview_id 仅用于 mode=apply。")
+    report, revised = proofread(source, args)
+    if destination is not None:
+        report.update(_write_project(revised, destination, overwrite=args.get("overwrite", False)))
+    return report
+
+
+def _compare(args: dict) -> dict:
+    from agent_revision import compare
+    return compare(_source(args["original"]), _source(args["revision"]), args)
+
+
 _HANDLERS = {
     "status": _status, "inspect": _inspect, "create": _create, "update": _update,
     "discover": _discover, "capture": _capture, "ocr": _ocr, "export": _export, "convert": _convert, "check": _check,
+    "rule_groups": _rule_groups, "proofread": _proofread, "compare": _compare,
 }
 
 

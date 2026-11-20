@@ -1,8 +1,8 @@
 """Browse checkpoint differences without applying them."""
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPixmap, QTextCursor, QTextFormat
+from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtGui import QColor, QKeySequence, QPixmap, QShortcut, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QLabel, QPlainTextEdit,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
     QSizePolicy, QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -34,6 +34,30 @@ class CheckpointCompareDialog(QDialog):
             self.resize(500, 150)
             layout.addWidget(buttons)
             return
+        filters = QHBoxLayout()
+        self.query = QLineEdit()
+        self.query.setAccessibleName("搜索差异")
+        buttons.button(QDialogButtonBox.StandardButton.Close).setAutoDefault(False)
+        self.query.setPlaceholderText("搜索项目、书内路径或有改动的行（Ctrl+F）")
+        self.query.setToolTip("搜索两侧有改动的行，包括行内保留的文字。纯排版变化按 XHTML 源码检索。")
+        self.query.setClearButtonEnabled(True)
+        filters.addWidget(self.query, 1)
+        self.category = QComboBox()
+        self.category.setAccessibleName("差异类别")
+        self.category.addItem("全部类别", "")
+        for kind in dict.fromkeys(change.kind for change in changes):
+            self.category.addItem(kind, kind)
+        filters.addWidget(self.category)
+        self.reset = QPushButton("重置筛选")
+        self.reset.setAutoDefault(False)
+        self.reset.clicked.connect(self.reset_filters)
+        filters.addWidget(self.reset)
+        layout.addLayout(filters)
+        self.count = QLabel()
+        self.count.setAccessibleName("筛选结果")
+        self.count.setWordWrap(True)
+        layout.addWidget(self.count)
+        self.excerpt_cache = {}
         self.items = QTreeWidget()
         self.items.setAccessibleName("版本差异列表")
         self.items.setHeaderLabels(["项目", "类别", "变化", "书内位置"])
@@ -76,12 +100,83 @@ class CheckpointCompareDialog(QDialog):
         layout.addWidget(self.markup)
         layout.addWidget(split, 3)
         self.items.currentItemChanged.connect(self.select_item)
-        self.items.setCurrentItem(self.items.topLevelItem(0))
+        self.details = split
+        self.query.textChanged.connect(self.filter_items)
+        self.category.currentIndexChanged.connect(self.filter_items)
+        self.query.returnPressed.connect(self.focus_results)
+        QShortcut(QKeySequence.StandardKey.Find, self, activated=self.focus_search)
+        self.filter_items()
         self.items.setFocus()
         layout.addWidget(buttons)
 
+    def focus_search(self):
+        self.query.setFocus()
+        self.query.selectAll()
+
+    def focus_results(self):
+        if self.items.currentItem() is not None:
+            self.items.setFocus()
+
+    def reset_filters(self):
+        with QSignalBlocker(self.category):
+            self.category.setCurrentIndex(0)
+        with QSignalBlocker(self.query):
+            self.query.clear()
+        self.filter_items()
+        self.focus_search()
+
+    def lines_for(self, index, source):
+        key = index, source
+        if key not in self.excerpt_cache:
+            change = self.changes[index]
+            values = change.source if source else (change.before, change.after)
+            self.excerpt_cache[key] = excerpts(*values)
+        return self.excerpt_cache[key]
+
+    def matches(self, index, query):
+        change = self.changes[index]
+        if not query or any(query in text.casefold() for text in (change.name, change.path, change.kind, change.action)):
+            return True
+        source = change.source is not None and change.before == change.after
+        raw = change.source if source else (change.before, change.after)
+        if not any(query in value.casefold() for value in raw):
+            return False
+        return any(changed and query in text.casefold() for lines in self.lines_for(index, source)
+                   for changed, text in lines)
+
+    def filter_items(self):
+        term = self.query.text().strip().casefold()
+        kind = self.category.currentData()
+        selected = self.items.currentItem()
+        first = None
+        visible = 0
+        with QSignalBlocker(self.items):
+            for index, change in enumerate(self.changes):
+                item = self.items.topLevelItem(index)
+                show = (not kind or change.kind == kind) and self.matches(index, term)
+                item.setHidden(not show)
+                if show:
+                    visible += 1
+                    if first is None:
+                        first = item
+            if selected is None or selected.isHidden():
+                selected = first
+            self.items.setCurrentItem(selected)
+        self.count.setText(f"显示 {visible} / {len(self.changes)} 项变化" if visible
+                           else "没有符合条件的变化。可更换关键词、类别，或重置筛选。")
+        self.reset.setEnabled(bool(self.query.text() or kind))
+        self.items.setVisible(bool(visible))
+        self.details.setVisible(bool(visible))
+        self.select_item()
+
     def select_item(self):
-        change = self.changes[self.items.indexOfTopLevelItem(self.items.currentItem())]
+        item = self.items.currentItem()
+        if item is None:
+            self.markup.hide()
+            for widget in (*self.panes, *self.images):
+                widget.clear()
+            return
+        change = self.changes[self.items.indexOfTopLevelItem(item)]
         self.markup.setVisible(change.source is not None)
         self.markup.blockSignals(True)
         self.markup.setChecked(change.source is not None and change.before == change.after)
@@ -109,16 +204,32 @@ class CheckpointCompareDialog(QDialog):
         item = self.items.currentItem()
         if item is None:
             return
-        change = self.changes[self.items.indexOfTopLevelItem(item)]
-        values = change.source if self.markup.isChecked() and change.source else (change.before, change.after)
-        for editor, lines, color in zip(self.panes, excerpts(*values), ("#fce8e6", "#ddf4e6")):
+        index = self.items.indexOfTopLevelItem(item)
+        query = self.query.text().strip()
+        matches = []
+        for editor, lines, color in zip(self.panes, self.lines_for(index, self.markup.isChecked()), ("#fce8e6", "#ddf4e6")):
             editor.setPlainText("\n".join(text for changed, text in lines))
             selections = []
-            for i, (changed, _) in enumerate(lines):
+            hit = None
+            for i, (changed, text) in enumerate(lines):
                 if changed:
                     selection = QTextEdit.ExtraSelection()
                     selection.cursor = QTextCursor(editor.document().findBlockByNumber(i))
                     selection.format.setBackground(QColor(color))
                     selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
                     selections.append(selection)
+                    if hit is None and query and query.casefold() in text.casefold():
+                        found = editor.document().find(query, selection.cursor)
+                        hit = selection.cursor if found.isNull() else found
+                        mark = QTextEdit.ExtraSelection()
+                        mark.cursor = hit
+                        mark.format.setBackground(QColor("#ffe494"))
+                        selections.append(mark)
             editor.setExtraSelections(selections)
+            matches.append(hit)
+        if any(hit is not None for hit in matches):
+            row = next(hit.blockNumber() for hit in matches if hit is not None)
+            for editor, hit in zip(self.panes, matches):
+                cursor = hit if hit is not None else QTextCursor(editor.document().findBlockByNumber(row))
+                editor.setTextCursor(cursor)
+                editor.centerCursor()

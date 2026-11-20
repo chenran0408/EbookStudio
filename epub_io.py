@@ -6,7 +6,7 @@ from hashlib import sha256
 from html import escape
 from io import BytesIO
 from pathlib import Path
-from typing import Iterable, TypedDict
+from typing import BinaryIO, Iterable, TypedDict
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 import re
@@ -199,7 +199,7 @@ def read_epub_metadata(path: Path) -> tuple[str, tuple[str, ...], tuple[str, ...
         return title, creators, subjects
 
 
-def open_epub(path: str | Path) -> Book:
+def open_epub(path: str | Path | BinaryIO) -> Book:
     with ZipFile(path) as archive:
         names = [archive_path(info.filename) for info in archive.infolist() if not info.is_dir()]
         if len(names) != len(set(names)):
@@ -235,7 +235,7 @@ def open_epub(path: str | Path) -> Book:
             for name, label in _navigation(ncx_path, originals[ncx_path], True).items():
                 label_map.setdefault(name, label)
         book = Book(
-            title=metadata.findtext(f'{{{DC}}}title') or Path(path).stem,
+            title=metadata.findtext(f'{{{DC}}}title') or Path(archive.filename or '电子书').stem,
             author=metadata.findtext(f'{{{DC}}}creator', ''),
             language=metadata.findtext(f'{{{DC}}}language') or 'zh-CN',
             _epub_path=opf_path,
